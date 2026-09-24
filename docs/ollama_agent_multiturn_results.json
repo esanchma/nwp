@@ -1,0 +1,47 @@
+[
+  {
+    "model": "granite4:3b-h",
+    "first_wall": 3.113,
+    "initial_call_ok": true,
+    "second_wall": 17.335,
+    "final_text": "Es un café colombiano de tueste medio, con notas de cacao y naranja, que pesa 250 g y cuesta 8,50 EUR.",
+    "repeated_calls": [],
+    "final_ok": true
+  },
+  {
+    "model": "granite4:7b-a1b-h",
+    "first_wall": 3.027,
+    "initial_call_ok": true,
+    "second_wall": 30.771,
+    "final_text": "El producto es un café de Colombia con tueste medio, 250 g, que cuesta 8,50 EUR y ofrece notas de cacao y naranja.",
+    "repeated_calls": [],
+    "final_ok": true
+  },
+  {
+    "model": "phi4-mini",
+    "first_wall": 24.824,
+    "initial_call_ok": false,
+    "second_wall": 0,
+    "final_text": "",
+    "repeated_calls": [],
+    "final_ok": false
+  },
+  {
+    "model": "qwen3:1.7b",
+    "first_wall": 7.882,
+    "initial_call_ok": true,
+    "second_wall": 3.18,
+    "final_text": "El café de Colombia tiene notas de cacao y naranja, y su precio es de 8,50 EUR.",
+    "repeated_calls": [],
+    "final_ok": true
+  },
+  {
+    "model": "qwen3.5:4b",
+    "first_wall": 25.642,
+    "initial_call_ok": true,
+    "second_wall": 10.147,
+    "final_text": "Es un café colombiano de tueste medio con notas de cacao y naranja que cuesta 8,50 euros por 250 gramos.",
+    "repeated_calls": [],
+    "final_ok": true
+  }
+]

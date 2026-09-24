@@ -1,0 +1,34 @@
+# Dependencies and Bun caches
+node_modules/
+.bun-cache/
+
+# Build and test output
+dist/
+coverage/
+.tmp/
+*.log
+
+# Local nwp runtime data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+attachments/
+api-token
+nwp-export*.tar.gz
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
