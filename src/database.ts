@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
@@ -29,6 +30,9 @@ import {
   type RevisionList,
   type RevisionSummary,
   type SearchResults,
+  type SemanticStatus,
+  type TagDefinition,
+  type TagKind,
   type TrashList,
   type TreeEntry,
 } from "./domain.ts";
@@ -183,11 +187,119 @@ const migrations = [
       ''
     FROM pages p WHERE p.deleted_at IS NULL;
   `,
+  `
+    CREATE TABLE tag_definitions (
+      tag TEXT PRIMARY KEY COLLATE NOCASE,
+      kind TEXT NOT NULL CHECK (kind IN ('topic', 'entity', 'source', 'type', 'custom')),
+      display_name TEXT NOT NULL,
+      description TEXT,
+      created_by TEXT NOT NULL CHECK (created_by IN ('human', 'model', 'migration')),
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE tag_aliases (
+      alias TEXT PRIMARY KEY COLLATE NOCASE,
+      canonical_tag TEXT NOT NULL REFERENCES tag_definitions(tag) ON DELETE CASCADE
+    );
+    INSERT OR IGNORE INTO tag_definitions(tag, kind, display_name, created_by, created_at)
+    SELECT DISTINCT tag,
+      CASE
+        WHEN tag LIKE 'entity:%' THEN 'entity'
+        WHEN tag LIKE 'source:%' THEN 'source'
+        WHEN tag LIKE 'type:%' THEN 'type'
+        WHEN tag LIKE 'topic:%' THEN 'topic'
+        ELSE 'custom'
+      END,
+      tag, 'migration', datetime('now')
+    FROM page_tags;
+    CREATE TRIGGER page_tags_define AFTER INSERT ON page_tags BEGIN
+      INSERT OR IGNORE INTO tag_definitions(tag, kind, display_name, created_by, created_at)
+      VALUES (
+        NEW.tag,
+        CASE
+          WHEN NEW.tag LIKE 'entity:%' THEN 'entity'
+          WHEN NEW.tag LIKE 'source:%' THEN 'source'
+          WHEN NEW.tag LIKE 'type:%' THEN 'type'
+          WHEN NEW.tag LIKE 'topic:%' THEN 'topic'
+          ELSE 'custom'
+        END,
+        NEW.tag, 'human', datetime('now')
+      );
+    END;
+
+    CREATE TABLE semantic_index_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      model TEXT NOT NULL,
+      dimensions INTEGER NOT NULL,
+      query_prefix TEXT NOT NULL,
+      chunk_characters INTEGER NOT NULL,
+      chunk_overlap INTEGER NOT NULL,
+      last_error TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE semantic_page_index (
+      page_id INTEGER PRIMARY KEY REFERENCES pages(id) ON DELETE CASCADE,
+      content_hash TEXT NOT NULL,
+      model TEXT NOT NULL,
+      dimensions INTEGER NOT NULL,
+      indexed_at TEXT NOT NULL
+    );
+    CREATE TABLE page_chunks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      UNIQUE(page_id, ordinal)
+    );
+    CREATE INDEX page_chunks_page_idx ON page_chunks(page_id, ordinal);
+    CREATE TABLE chunk_embeddings (
+      chunk_id INTEGER PRIMARY KEY REFERENCES page_chunks(id) ON DELETE CASCADE,
+      model TEXT NOT NULL,
+      dimensions INTEGER NOT NULL,
+      embedding BLOB NOT NULL,
+      indexed_at TEXT NOT NULL
+    );
+    CREATE INDEX chunk_embeddings_model_idx ON chunk_embeddings(model, dimensions);
+    CREATE TABLE semantic_index_queue (
+      page_id INTEGER PRIMARY KEY REFERENCES pages(id) ON DELETE CASCADE,
+      requested_at TEXT NOT NULL,
+      available_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      revision INTEGER NOT NULL DEFAULT 1,
+      lease_owner TEXT,
+      lease_until TEXT,
+      last_error TEXT
+    );
+    INSERT INTO semantic_index_queue(page_id, requested_at, available_at)
+      SELECT id, datetime('now'), datetime('now') FROM pages WHERE deleted_at IS NULL;
+    CREATE TRIGGER pages_semantic_insert AFTER INSERT ON pages BEGIN
+      INSERT INTO semantic_index_queue(page_id, requested_at, available_at, attempts, revision)
+      VALUES (NEW.id, datetime('now'), datetime('now'), 0, 1)
+      ON CONFLICT(page_id) DO UPDATE SET requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = semantic_index_queue.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL;
+    END;
+    CREATE TRIGGER pages_semantic_update AFTER UPDATE OF title, alias, body, status, properties_json, deleted_at ON pages BEGIN
+      INSERT INTO semantic_index_queue(page_id, requested_at, available_at, attempts, revision)
+      VALUES (NEW.id, datetime('now'), datetime('now'), 0, 1)
+      ON CONFLICT(page_id) DO UPDATE SET requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = semantic_index_queue.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL;
+    END;
+  `,
 ];
+
+export interface SemanticIndexConfig {
+  model: string;
+  dimensions: number;
+  queryPrefix: string;
+  chunkCharacters: number;
+  chunkOverlap: number;
+}
+
+export interface SemanticIndexTask { pageId: number; revision: number; page: Page | null }
+export interface SemanticNeighbor { pageId: number; chunkId: number; content: string; distance: number }
 
 export class PageStore {
   readonly db: Database;
   readonly attachmentDir: string;
+  private vectorAvailable = false;
 
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
@@ -224,9 +336,151 @@ export class PageStore {
     migrate.immediate();
   }
 
+  configureSemantic(config: SemanticIndexConfig): void {
+    const current = this.db.query<{ model: string; dimensions: number; query_prefix: string; chunk_characters: number; chunk_overlap: number }, []>("SELECT model, dimensions, query_prefix, chunk_characters, chunk_overlap FROM semantic_index_config WHERE id = 1").get();
+    const changed = !current || current.model !== config.model || current.dimensions !== config.dimensions || current.query_prefix !== config.queryPrefix || current.chunk_characters !== config.chunkCharacters || current.chunk_overlap !== config.chunkOverlap;
+    if (!changed) return;
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.run("DELETE FROM semantic_page_index");
+      this.db.run("DELETE FROM page_chunks");
+      this.db.run("DELETE FROM semantic_index_queue");
+      this.db.run("INSERT INTO semantic_index_queue(page_id, requested_at, available_at) SELECT id, ?, ? FROM pages WHERE deleted_at IS NULL", [now, now]);
+      this.db.run("INSERT OR REPLACE INTO semantic_index_config(id, model, dimensions, query_prefix, chunk_characters, chunk_overlap, last_error, updated_at) VALUES (1, ?, ?, ?, ?, ?, NULL, ?)", [config.model, config.dimensions, config.queryPrefix, config.chunkCharacters, config.chunkOverlap, now]);
+    }).immediate();
+  }
+
+  setVectorAvailable(value: boolean): void {
+    this.vectorAvailable = value;
+  }
+
+  claimSemanticTask(owner: string, leaseMilliseconds = 60_000): SemanticIndexTask | null {
+    const now = new Date();
+    const until = new Date(now.getTime() + leaseMilliseconds).toISOString();
+    const claim = this.db.transaction(() => {
+      const row = this.db.query<{ page_id: number; revision: number }, [string, string]>("SELECT page_id, revision FROM semantic_index_queue WHERE available_at <= ? AND (lease_until IS NULL OR lease_until < ?) ORDER BY requested_at, page_id LIMIT 1").get(now.toISOString(), now.toISOString());
+      if (!row) return null;
+      this.db.run("UPDATE semantic_index_queue SET lease_owner = ?, lease_until = ? WHERE page_id = ? AND revision = ?", [owner, until, row.page_id, row.revision]);
+      return { pageId: row.page_id, revision: row.revision };
+    }).immediate();
+    if (claim === null) return null;
+    try { return { ...claim, page: this.getById(claim.pageId) }; }
+    catch (error) {
+      if (error instanceof AppError && error.status === 404) return { ...claim, page: null };
+      throw error;
+    }
+  }
+
+  renewSemanticLease(pageId: number, revision: number, owner: string, leaseMilliseconds = 60_000): boolean {
+    const result = this.db.run("UPDATE semantic_index_queue SET lease_until = ? WHERE page_id = ? AND revision = ? AND lease_owner = ?", [new Date(Date.now() + leaseMilliseconds).toISOString(), pageId, revision, owner]);
+    return result.changes === 1;
+  }
+
+  completeSemanticTask(pageId: number, revision: number, contentHash: string, chunks: string[], embeddings: Float32Array[], config: SemanticIndexConfig): void {
+    if (chunks.length !== embeddings.length) throw new Error("semantic chunk and embedding counts differ");
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      const current = this.db.query<{ revision: number }, [number]>("SELECT revision FROM semantic_index_queue WHERE page_id = ?").get(pageId);
+      if (!current || current.revision !== revision) return;
+      this.db.run("DELETE FROM page_chunks WHERE page_id = ?", [pageId]);
+      const insertChunk = this.db.query("INSERT INTO page_chunks(page_id, ordinal, content, content_hash) VALUES (?, ?, ?, ?)");
+      const insertEmbedding = this.db.query("INSERT INTO chunk_embeddings(chunk_id, model, dimensions, embedding, indexed_at) VALUES (?, ?, ?, ?, ?)");
+      for (let index = 0; index < chunks.length; index += 1) {
+        const embedding = embeddings[index]!;
+        if (embedding.length !== config.dimensions) throw new Error(`embedding has ${embedding.length} dimensions; expected ${config.dimensions}`);
+        const result = insertChunk.run(pageId, index, chunks[index], createHash("sha256").update(chunks[index]!).digest("hex"));
+        insertEmbedding.run(Number(result.lastInsertRowid), config.model, config.dimensions, embedding, now);
+      }
+      this.db.run("INSERT OR REPLACE INTO semantic_page_index(page_id, content_hash, model, dimensions, indexed_at) VALUES (?, ?, ?, ?, ?)", [pageId, contentHash, config.model, config.dimensions, now]);
+      this.db.run("DELETE FROM semantic_index_queue WHERE page_id = ? AND revision = ?", [pageId, revision]);
+      this.db.run("UPDATE semantic_index_config SET last_error = NULL, updated_at = ? WHERE id = 1", [now]);
+    }).immediate();
+  }
+
+  removeSemanticPage(pageId: number, revision: number): void {
+    this.db.transaction(() => {
+      const current = this.db.query<{ revision: number }, [number]>("SELECT revision FROM semantic_index_queue WHERE page_id = ?").get(pageId);
+      if (!current || current.revision !== revision) return;
+      this.db.run("DELETE FROM page_chunks WHERE page_id = ?", [pageId]);
+      this.db.run("DELETE FROM semantic_page_index WHERE page_id = ?", [pageId]);
+      this.db.run("DELETE FROM semantic_index_queue WHERE page_id = ? AND revision = ?", [pageId, revision]);
+    }).immediate();
+  }
+
+  failSemanticTask(pageId: number, revision: number, message: string): void {
+    const row = this.db.query<{ attempts: number }, [number, number]>("SELECT attempts FROM semantic_index_queue WHERE page_id = ? AND revision = ?").get(pageId, revision);
+    if (!row) return;
+    const attempts = row.attempts + 1;
+    const available = new Date(Date.now() + Math.min(300_000, 1000 * 2 ** Math.min(attempts, 8))).toISOString();
+    this.db.run("UPDATE semantic_index_queue SET attempts = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, last_error = ? WHERE page_id = ? AND revision = ?", [attempts, available, message.slice(0, 2000), pageId, revision]);
+    this.db.run("UPDATE semantic_index_config SET last_error = ?, updated_at = ? WHERE id = 1", [message.slice(0, 2000), new Date().toISOString()]);
+  }
+
+  semanticNeighbors(embedding: Float32Array, limit = 50, status: PageStatus | "all" = "published"): SemanticNeighbor[] {
+    if (!this.vectorAvailable) throw new AppError("semantic_unavailable", "semantic vector search is unavailable", 503);
+    const config = this.db.query<{ model: string; dimensions: number }, []>("SELECT model, dimensions FROM semantic_index_config WHERE id = 1").get();
+    if (!config || embedding.length !== config.dimensions) throw new AppError("semantic_unavailable", "semantic index configuration is unavailable", 503);
+    const statusClause = status === "all" ? "" : "AND p.status = ?";
+    const bindings: Array<string | number | Float32Array> = [embedding, config.model, config.dimensions, ...(status === "all" ? [] : [status]), Math.max(1, Math.min(100, limit))];
+    return this.db.query<SemanticNeighbor, Array<string | number | Float32Array>>(`
+      SELECT pc.page_id AS pageId, pc.id AS chunkId, pc.content,
+        vec_distance_cosine(ce.embedding, ?) AS distance
+      FROM chunk_embeddings ce
+      JOIN page_chunks pc ON pc.id = ce.chunk_id
+      JOIN pages p ON p.id = pc.page_id
+      WHERE ce.model = ? AND ce.dimensions = ? AND p.deleted_at IS NULL ${statusClause}
+      ORDER BY distance LIMIT ?
+    `).all(...bindings);
+  }
+
+  semanticStatus(enabled: boolean, model: string, dimensions: number): SemanticStatus {
+    const pendingPages = this.db.query<{ count: number }, []>("SELECT count(*) AS count FROM semantic_index_queue").get()!.count;
+    const indexedPages = this.db.query<{ count: number }, []>("SELECT count(*) AS count FROM semantic_page_index").get()!.count;
+    const row = this.db.query<{ last_error: string | null }, []>("SELECT last_error FROM semantic_index_config WHERE id = 1").get();
+    return { enabled, vectorAvailable: this.vectorAvailable, model, dimensions, pendingPages, indexedPages, lastError: row?.last_error ?? null };
+  }
+
+  resolveTags(values: string[]): string[] {
+    return this.canonicalizeTags(values);
+  }
+
+  listTagDefinitions(): TagDefinition[] {
+    return this.db.query<{ tag: string; kind: TagKind; display_name: string; description: string | null; created_by: "human" | "model" | "migration"; created_at: string; usage_count: number }, []>(`
+      SELECT td.*, (SELECT count(*) FROM page_tags pt WHERE pt.tag = td.tag COLLATE NOCASE) AS usage_count
+      FROM tag_definitions td ORDER BY usage_count DESC, td.tag COLLATE NOCASE
+    `).all().map((row) => ({ tag: row.tag, kind: row.kind, displayName: row.display_name, description: row.description, createdBy: row.created_by, aliases: this.db.query<{ alias: string }, [string]>("SELECT alias FROM tag_aliases WHERE canonical_tag = ? ORDER BY alias COLLATE NOCASE").all(row.tag).map(({ alias }) => alias), usageCount: row.usage_count, createdAt: row.created_at }));
+  }
+
+  defineTag(tagValue: string, kind: TagKind, displayName: string, aliases: string[] = [], description: string | null = null, createdBy: "human" | "model" = "human"): TagDefinition {
+    const tag = normalizeTags([tagValue])[0]!;
+    const normalizedAliases = normalizeTags(aliases).filter((alias) => alias !== tag);
+    const now = new Date().toISOString();
+    for (const alias of normalizedAliases) {
+      const owner = this.db.query<{ canonical_tag: string }, [string]>("SELECT canonical_tag FROM tag_aliases WHERE alias = ? COLLATE NOCASE").get(alias);
+      if (owner && owner.canonical_tag !== tag) throw new AppError("tag_alias_conflict", `alias '${alias}' already belongs to '${owner.canonical_tag}'`, 409);
+    }
+    this.db.transaction(() => {
+      this.db.run("INSERT INTO tag_definitions(tag, kind, display_name, description, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(tag) DO UPDATE SET kind = excluded.kind, display_name = excluded.display_name, description = excluded.description", [tag, kind, displayName.trim() || tag, description, createdBy, now]);
+      this.db.run("DELETE FROM tag_aliases WHERE canonical_tag = ?", [tag]);
+      for (const alias of normalizedAliases) {
+        this.db.run("UPDATE OR IGNORE tag_aliases SET canonical_tag = ? WHERE canonical_tag = ? COLLATE NOCASE", [tag, alias]);
+        this.db.run("DELETE FROM tag_definitions WHERE tag = ? COLLATE NOCASE", [alias]);
+        this.db.run("INSERT INTO tag_aliases(alias, canonical_tag) VALUES (?, ?)", [alias, tag]);
+        const affected = this.db.query<{ page_id: number }, [string]>("SELECT page_id FROM page_tags WHERE tag = ? COLLATE NOCASE").all(alias);
+        this.db.run("INSERT OR IGNORE INTO page_tags(page_id, tag) SELECT page_id, ? FROM page_tags WHERE tag = ? COLLATE NOCASE", [tag, alias]);
+        this.db.run("DELETE FROM page_tags WHERE tag = ? COLLATE NOCASE", [alias]);
+        for (const { page_id } of affected) {
+          this.refreshSearch(page_id);
+          this.db.run("INSERT INTO semantic_index_queue(page_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, 0, 1) ON CONFLICT(page_id) DO UPDATE SET requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = semantic_index_queue.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [page_id, now, now]);
+        }
+      }
+    }).immediate();
+    return this.listTagDefinitions().find((item) => item.tag === tag)!;
+  }
+
   create(input: PageInput, source: ChangeSource): Page {
     const parsed = pageInputSchema.parse(input);
-    const tags = normalizeTags(parsed.tags);
+    const tags = this.canonicalizeTags(parsed.tags);
     const properties = normalizeProperties(parsed.properties);
     const alias = parsed.alias ? validateAlias(parsed.alias) : this.availableAlias(slugify(parsed.title));
     this.validateParent(null, parsed.parentId);
@@ -263,7 +517,7 @@ export class PageStore {
     const title = parsed.title ?? current.title;
     const alias = parsed.alias === undefined ? current.alias : validateAlias(parsed.alias);
     const body = parsed.body ?? current.body;
-    const tags = parsed.tags === undefined ? current.tags : normalizeTags(parsed.tags);
+    const tags = parsed.tags === undefined ? current.tags : this.canonicalizeTags(parsed.tags);
     const status = parsed.status ?? current.status;
     const parentId = parsed.parentId === undefined ? current.parentId : parsed.parentId;
     const properties = parsed.properties === undefined ? current.properties : normalizeProperties(parsed.properties);
@@ -336,7 +590,7 @@ export class PageStore {
 
   search(query: string, tags: string[] = [], cursorValue: string | null = null, limitValue = 20, statusValue: PageStatus | "all" = "published", propertyFilters: PageProperties = {}): SearchResults {
     const terms = ftsQuery(query);
-    const normalizedTags = normalizeTags(tags);
+    const normalizedTags = this.canonicalizeTags(tags);
     const properties = normalizeProperties(propertyFilters);
     const status = statusFilter(statusValue);
     if (!terms && normalizedTags.length === 0 && Object.keys(properties).length === 0) {
@@ -682,6 +936,11 @@ export class PageStore {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+
+  private canonicalizeTags(values: string[]): string[] {
+    const tags = normalizeTags(values).map((tag) => this.db.query<{ canonical_tag: string }, [string]>("SELECT canonical_tag FROM tag_aliases WHERE alias = ? COLLATE NOCASE").get(tag)?.canonical_tag ?? tag);
+    return normalizeTags(tags);
   }
 
   private availableAlias(base: string): string {

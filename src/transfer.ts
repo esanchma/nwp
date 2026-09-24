@@ -94,6 +94,7 @@ export function createFullExport(store: PageStore): { stream: ReadableStream; fi
   const trash = store.allDeletedPages();
   const revisions = store.allRevisions();
   const attachments = store.allAttachments();
+  const taxonomy = store.listTagDefinitions();
   const generatedAt = new Date().toISOString();
   const pack = tar.pack();
   const gzip = createGzip({ level: 6 });
@@ -109,6 +110,7 @@ export function createFullExport(store: PageStore): { stream: ReadableStream; fi
         trash: trash.map((page) => ({ id: page.id, alias: page.alias, deletedAt: page.deletedAt, path: `trash/${page.id}.md` })),
         revisions: revisions.map((revision) => ({ id: revision.id, pageId: revision.pageId, path: `history/${revision.pageId}/${revision.id}.md` })),
         attachments: attachments.map((attachment) => ({ ...attachment, path: `attachments/${attachment.sha256}` })),
+        taxonomy,
       };
       await addBuffer(pack, "manifest.json", `${JSON.stringify(manifest, null, 2)}\n`);
       for (const page of active) await addBuffer(pack, `pages/${page.id}.md`, exportPageMarkdown(page));

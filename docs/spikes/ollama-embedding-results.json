@@ -1,0 +1,1286 @@
+{
+  "generatedAt": "2026-09-24T20:52:32.241Z",
+  "endpoint": "http://127.0.0.1:11434",
+  "ollamaVersion": {
+    "version": "0.34.2"
+  },
+  "corpus": {
+    "documents": 24,
+    "queries": 14,
+    "allQueriesCrossLanguage": true
+  },
+  "results": [
+    {
+      "configuration": "qwen3-embedding:0.6b:raw",
+      "model": "qwen3-embedding:0.6b",
+      "queryPrefix": "",
+      "dimension": 1024,
+      "quality": {
+        "mrr": 0.86,
+        "recallAt1": 0.786,
+        "recallAt3": 0.929,
+        "ndcgAt5": 0.881
+      },
+      "latency": {
+        "coldMs": 1529.013,
+        "indexBatchMs": 4408.813,
+        "documentsPerSecond": 5.444,
+        "warmQueryP50Ms": 121.407,
+        "warmQueryP95Ms": 257.236,
+        "warmQueryMeanMs": 137.292
+      },
+      "rankings": [
+        {
+          "queryId": "q-local-es",
+          "relevant": [
+            "local-models-es",
+            "local-models-en"
+          ],
+          "top5": [
+            {
+              "id": "cloud-models-en",
+              "score": 0.6978437633143921
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.6745852650856392
+            },
+            {
+              "id": "local-models-en",
+              "score": 0.6349617980171282
+            },
+            {
+              "id": "local-models-es",
+              "score": 0.605423293691795
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.5251904091417203
+            }
+          ]
+        },
+        {
+          "queryId": "q-local-en",
+          "relevant": [
+            "local-models-en",
+            "local-models-es"
+          ],
+          "top5": [
+            {
+              "id": "cloud-models-en",
+              "score": 0.8004183094450026
+            },
+            {
+              "id": "local-models-en",
+              "score": 0.7796469094328177
+            },
+            {
+              "id": "local-models-es",
+              "score": 0.6848785227003032
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.6433227728414143
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.49735850410220417
+            }
+          ]
+        },
+        {
+          "queryId": "q-vector-es",
+          "relevant": [
+            "vector-en",
+            "hybrid-es"
+          ],
+          "top5": [
+            {
+              "id": "metadata-en",
+              "score": 0.6415843972420563
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.5735799820274717
+            },
+            {
+              "id": "fts-es",
+              "score": 0.5203752760380389
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.5184525946399081
+            },
+            {
+              "id": "vector-en",
+              "score": 0.5157293985862832
+            }
+          ]
+        },
+        {
+          "queryId": "q-hybrid-en",
+          "relevant": [
+            "hybrid-es",
+            "fts-es",
+            "vector-en"
+          ],
+          "top5": [
+            {
+              "id": "hybrid-es",
+              "score": 0.6045796837245314
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.6001294416745676
+            },
+            {
+              "id": "fts-es",
+              "score": 0.5833014708412936
+            },
+            {
+              "id": "vector-en",
+              "score": 0.5766119598206183
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.5239397007922646
+            }
+          ]
+        },
+        {
+          "queryId": "q-jobs-es",
+          "relevant": [
+            "jobs-es",
+            "jobs-en"
+          ],
+          "top5": [
+            {
+              "id": "jobs-en",
+              "score": 0.5901113464703174
+            },
+            {
+              "id": "threads-en",
+              "score": 0.5661641699692327
+            },
+            {
+              "id": "jobs-es",
+              "score": 0.5533331926212823
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.49150769222890556
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.4913017333040363
+            }
+          ]
+        },
+        {
+          "queryId": "q-jobs-en",
+          "relevant": [
+            "jobs-en",
+            "jobs-es"
+          ],
+          "top5": [
+            {
+              "id": "jobs-en",
+              "score": 0.6834877863365932
+            },
+            {
+              "id": "jobs-es",
+              "score": 0.6301757514823494
+            },
+            {
+              "id": "threads-en",
+              "score": 0.5436128097184211
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.4066019502844551
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.375035065735942
+            }
+          ]
+        },
+        {
+          "queryId": "q-injection-es",
+          "relevant": [
+            "prompt-injection-es",
+            "prompt-injection-en"
+          ],
+          "top5": [
+            {
+              "id": "prompt-injection-en",
+              "score": 0.8031196668825048
+            },
+            {
+              "id": "prompt-injection-es",
+              "score": 0.6776078133481722
+            },
+            {
+              "id": "xss-en",
+              "score": 0.6604024917721945
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.4958356978349945
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.4668047368445716
+            }
+          ]
+        },
+        {
+          "queryId": "q-injection-en",
+          "relevant": [
+            "prompt-injection-en",
+            "prompt-injection-es"
+          ],
+          "top5": [
+            {
+              "id": "prompt-injection-en",
+              "score": 0.7453605414956664
+            },
+            {
+              "id": "prompt-injection-es",
+              "score": 0.582004543592467
+            },
+            {
+              "id": "xss-en",
+              "score": 0.570370051500954
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.535815140620023
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.5107099419223405
+            }
+          ]
+        },
+        {
+          "queryId": "q-solar-es",
+          "relevant": [
+            "solar-es",
+            "solar-en"
+          ],
+          "top5": [
+            {
+              "id": "solar-en",
+              "score": 0.7019920239287839
+            },
+            {
+              "id": "solar-es",
+              "score": 0.4764208505977491
+            },
+            {
+              "id": "wind-en",
+              "score": 0.37857521087388263
+            },
+            {
+              "id": "threads-en",
+              "score": 0.37730459416942375
+            },
+            {
+              "id": "finance-en",
+              "score": 0.3147435464421847
+            }
+          ]
+        },
+        {
+          "queryId": "q-cooking-en",
+          "relevant": [
+            "cooking-es"
+          ],
+          "top5": [
+            {
+              "id": "cooking-es",
+              "score": 0.4240679067136418
+            },
+            {
+              "id": "cooking-en",
+              "score": 0.3907820232101872
+            },
+            {
+              "id": "local-models-en",
+              "score": 0.37729325374083483
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.3762563102845781
+            },
+            {
+              "id": "local-models-es",
+              "score": 0.3665708084222635
+            }
+          ]
+        },
+        {
+          "queryId": "q-travel-en",
+          "relevant": [
+            "travel-es"
+          ],
+          "top5": [
+            {
+              "id": "travel-es",
+              "score": 0.6527602202756393
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.48984844609844
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.4789089948394544
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.4614845354524854
+            },
+            {
+              "id": "vector-en",
+              "score": 0.4497390029656571
+            }
+          ]
+        },
+        {
+          "queryId": "q-metadata-es",
+          "relevant": [
+            "metadata-en"
+          ],
+          "top5": [
+            {
+              "id": "metadata-en",
+              "score": 0.6025342218138837
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.5360551714689031
+            },
+            {
+              "id": "fts-es",
+              "score": 0.5139157235006019
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.43230112024436196
+            },
+            {
+              "id": "vector-en",
+              "score": 0.3926462875684408
+            }
+          ]
+        },
+        {
+          "queryId": "q-finance-es",
+          "relevant": [
+            "finance-en"
+          ],
+          "top5": [
+            {
+              "id": "finance-en",
+              "score": 0.6823484919212941
+            },
+            {
+              "id": "fts-es",
+              "score": 0.4145994707928231
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.370892067656599
+            },
+            {
+              "id": "postgres-en",
+              "score": 0.3639831537796796
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.35773380733492094
+            }
+          ]
+        },
+        {
+          "queryId": "q-health-en",
+          "relevant": [
+            "medical-es"
+          ],
+          "top5": [
+            {
+              "id": "medical-es",
+              "score": 0.5466085082383484
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.41071760761161763
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.3839397178425217
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.382709773637586
+            },
+            {
+              "id": "finance-en",
+              "score": 0.36782640935846317
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "configuration": "qwen3-embedding:0.6b:instructed",
+      "model": "qwen3-embedding:0.6b",
+      "queryPrefix": "Instruct: Retrieve passages that answer the search query across Spanish and English.\nQuery: ",
+      "dimension": 1024,
+      "quality": {
+        "mrr": 0.946,
+        "recallAt1": 0.929,
+        "recallAt3": 0.929,
+        "ndcgAt5": 0.939
+      },
+      "latency": {
+        "coldMs": 1561.776,
+        "indexBatchMs": 4375.211,
+        "documentsPerSecond": 5.485,
+        "warmQueryP50Ms": 118.775,
+        "warmQueryP95Ms": 134.659,
+        "warmQueryMeanMs": 100.383
+      },
+      "rankings": [
+        {
+          "queryId": "q-local-es",
+          "relevant": [
+            "local-models-es",
+            "local-models-en"
+          ],
+          "top5": [
+            {
+              "id": "local-models-es",
+              "score": 0.5364406788801227
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.5147582088972349
+            },
+            {
+              "id": "local-models-en",
+              "score": 0.5103446961511421
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.5041151491868205
+            },
+            {
+              "id": "prompt-injection-es",
+              "score": 0.43121606157340553
+            }
+          ]
+        },
+        {
+          "queryId": "q-local-en",
+          "relevant": [
+            "local-models-en",
+            "local-models-es"
+          ],
+          "top5": [
+            {
+              "id": "local-models-en",
+              "score": 0.6548700347827408
+            },
+            {
+              "id": "local-models-es",
+              "score": 0.6159523370014962
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.6126899752366264
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.45777279549108446
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.346188674327124
+            }
+          ]
+        },
+        {
+          "queryId": "q-vector-es",
+          "relevant": [
+            "vector-en",
+            "hybrid-es"
+          ],
+          "top5": [
+            {
+              "id": "metadata-en",
+              "score": 0.49598597326681393
+            },
+            {
+              "id": "fts-es",
+              "score": 0.44611099836688095
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.4356819092560854
+            },
+            {
+              "id": "vector-en",
+              "score": 0.4091813253154992
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.3917715790750811
+            }
+          ]
+        },
+        {
+          "queryId": "q-hybrid-en",
+          "relevant": [
+            "hybrid-es",
+            "fts-es",
+            "vector-en"
+          ],
+          "top5": [
+            {
+              "id": "hybrid-es",
+              "score": 0.59974645526899
+            },
+            {
+              "id": "fts-es",
+              "score": 0.4853172005434864
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.4568088773478755
+            },
+            {
+              "id": "vector-en",
+              "score": 0.4438672849429976
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.39673744814773926
+            }
+          ]
+        },
+        {
+          "queryId": "q-jobs-es",
+          "relevant": [
+            "jobs-es",
+            "jobs-en"
+          ],
+          "top5": [
+            {
+              "id": "jobs-es",
+              "score": 0.4895948303975524
+            },
+            {
+              "id": "jobs-en",
+              "score": 0.4868548202998287
+            },
+            {
+              "id": "threads-en",
+              "score": 0.46736932171105444
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.4001571902916934
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.3753000158993674
+            }
+          ]
+        },
+        {
+          "queryId": "q-jobs-en",
+          "relevant": [
+            "jobs-en",
+            "jobs-es"
+          ],
+          "top5": [
+            {
+              "id": "jobs-es",
+              "score": 0.6809601173741852
+            },
+            {
+              "id": "jobs-en",
+              "score": 0.6464742344146199
+            },
+            {
+              "id": "threads-en",
+              "score": 0.4776814352588761
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.36116693981572573
+            },
+            {
+              "id": "vector-en",
+              "score": 0.34541312487430664
+            }
+          ]
+        },
+        {
+          "queryId": "q-injection-es",
+          "relevant": [
+            "prompt-injection-es",
+            "prompt-injection-en"
+          ],
+          "top5": [
+            {
+              "id": "prompt-injection-es",
+              "score": 0.6744663412247831
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.6363351167722879
+            },
+            {
+              "id": "xss-en",
+              "score": 0.5232946621503655
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.320661976960274
+            },
+            {
+              "id": "finance-en",
+              "score": 0.30769770822279335
+            }
+          ]
+        },
+        {
+          "queryId": "q-injection-en",
+          "relevant": [
+            "prompt-injection-en",
+            "prompt-injection-es"
+          ],
+          "top5": [
+            {
+              "id": "prompt-injection-en",
+              "score": 0.6517434218373003
+            },
+            {
+              "id": "prompt-injection-es",
+              "score": 0.5752094700913514
+            },
+            {
+              "id": "xss-en",
+              "score": 0.5503670335454055
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.465788538475364
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.3831073318979519
+            }
+          ]
+        },
+        {
+          "queryId": "q-solar-es",
+          "relevant": [
+            "solar-es",
+            "solar-en"
+          ],
+          "top5": [
+            {
+              "id": "solar-en",
+              "score": 0.6918445589189915
+            },
+            {
+              "id": "solar-es",
+              "score": 0.5265403900989555
+            },
+            {
+              "id": "wind-en",
+              "score": 0.3227907240755637
+            },
+            {
+              "id": "threads-en",
+              "score": 0.27016911646742114
+            },
+            {
+              "id": "local-models-es",
+              "score": 0.24309069093005356
+            }
+          ]
+        },
+        {
+          "queryId": "q-cooking-en",
+          "relevant": [
+            "cooking-es"
+          ],
+          "top5": [
+            {
+              "id": "cooking-es",
+              "score": 0.4489754202807231
+            },
+            {
+              "id": "local-models-es",
+              "score": 0.29710363567518355
+            },
+            {
+              "id": "cooking-en",
+              "score": 0.2746551074134932
+            },
+            {
+              "id": "local-models-en",
+              "score": 0.262013478342605
+            },
+            {
+              "id": "gardening-en",
+              "score": 0.25399279500212435
+            }
+          ]
+        },
+        {
+          "queryId": "q-travel-en",
+          "relevant": [
+            "travel-es"
+          ],
+          "top5": [
+            {
+              "id": "travel-es",
+              "score": 0.6980539201430932
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.2819014391773536
+            },
+            {
+              "id": "vector-en",
+              "score": 0.25795378284441034
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.25494157908547443
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.2456549455667428
+            }
+          ]
+        },
+        {
+          "queryId": "q-metadata-es",
+          "relevant": [
+            "metadata-en"
+          ],
+          "top5": [
+            {
+              "id": "metadata-en",
+              "score": 0.541056327511826
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.45326580377702785
+            },
+            {
+              "id": "fts-es",
+              "score": 0.43883496265491423
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.36589288538631703
+            },
+            {
+              "id": "vector-en",
+              "score": 0.3034480645360512
+            }
+          ]
+        },
+        {
+          "queryId": "q-finance-es",
+          "relevant": [
+            "finance-en"
+          ],
+          "top5": [
+            {
+              "id": "finance-en",
+              "score": 0.6439614755317269
+            },
+            {
+              "id": "fts-es",
+              "score": 0.41303162578442604
+            },
+            {
+              "id": "postgres-en",
+              "score": 0.3338252003102423
+            },
+            {
+              "id": "hybrid-es",
+              "score": 0.31149134767710074
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.3036778245387228
+            }
+          ]
+        },
+        {
+          "queryId": "q-health-en",
+          "relevant": [
+            "medical-es"
+          ],
+          "top5": [
+            {
+              "id": "medical-es",
+              "score": 0.5369507621484907
+            },
+            {
+              "id": "jobs-en",
+              "score": 0.2646148969448129
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.25645056656995924
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.22302454283789314
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.2195473935262809
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "configuration": "bge-m3:raw",
+      "model": "bge-m3",
+      "queryPrefix": "",
+      "dimension": 1024,
+      "quality": {
+        "mrr": 1,
+        "recallAt1": 1,
+        "recallAt3": 1,
+        "ndcgAt5": 0.994
+      },
+      "latency": {
+        "coldMs": 1797.781,
+        "indexBatchMs": 5317.527,
+        "documentsPerSecond": 4.513,
+        "warmQueryP50Ms": 117.765,
+        "warmQueryP95Ms": 126.053,
+        "warmQueryMeanMs": 118.18
+      },
+      "rankings": [
+        {
+          "queryId": "q-local-es",
+          "relevant": [
+            "local-models-es",
+            "local-models-en"
+          ],
+          "top5": [
+            {
+              "id": "local-models-es",
+              "score": 0.5150666082133447
+            },
+            {
+              "id": "local-models-en",
+              "score": 0.5127597637684107
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.4635210960641064
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.44843695081423857
+            },
+            {
+              "id": "threads-en",
+              "score": 0.42033100009297636
+            }
+          ]
+        },
+        {
+          "queryId": "q-local-en",
+          "relevant": [
+            "local-models-en",
+            "local-models-es"
+          ],
+          "top5": [
+            {
+              "id": "local-models-en",
+              "score": 0.4747822277224675
+            },
+            {
+              "id": "local-models-es",
+              "score": 0.4388266487837264
+            },
+            {
+              "id": "jobs-en",
+              "score": 0.40310751869613815
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.38597288265616425
+            },
+            {
+              "id": "threads-en",
+              "score": 0.3707432481860163
+            }
+          ]
+        },
+        {
+          "queryId": "q-vector-es",
+          "relevant": [
+            "vector-en",
+            "hybrid-es"
+          ],
+          "top5": [
+            {
+              "id": "hybrid-es",
+              "score": 0.5706979264917225
+            },
+            {
+              "id": "fts-es",
+              "score": 0.5383303651216922
+            },
+            {
+              "id": "vector-en",
+              "score": 0.534845599218857
+            },
+            {
+              "id": "jobs-en",
+              "score": 0.4526649210815572
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.45014961232563594
+            }
+          ]
+        },
+        {
+          "queryId": "q-hybrid-en",
+          "relevant": [
+            "hybrid-es",
+            "fts-es",
+            "vector-en"
+          ],
+          "top5": [
+            {
+              "id": "hybrid-es",
+              "score": 0.6236384171544603
+            },
+            {
+              "id": "vector-en",
+              "score": 0.5612669187698162
+            },
+            {
+              "id": "fts-es",
+              "score": 0.5087996111850821
+            },
+            {
+              "id": "metadata-en",
+              "score": 0.43447817261430505
+            },
+            {
+              "id": "postgres-en",
+              "score": 0.43180827971978947
+            }
+          ]
+        },
+        {
+          "queryId": "q-jobs-es",
+          "relevant": [
+            "jobs-es",
+            "jobs-en"
+          ],
+          "top5": [
+            {
+              "id": "jobs-en",
+              "score": 0.5955322666950932
+            },
+            {
+              "id": "jobs-es",
+              "score": 0.5523292472734486
+            },
+            {
+              "id": "threads-en",
+              "score": 0.476872144741028
+            },
+            {
+              "id": "postgres-en",
+              "score": 0.4206185079751247
+            },
+            {
+              "id": "prompt-injection-es",
+              "score": 0.398676087676388
+            }
+          ]
+        },
+        {
+          "queryId": "q-jobs-en",
+          "relevant": [
+            "jobs-en",
+            "jobs-es"
+          ],
+          "top5": [
+            {
+              "id": "jobs-es",
+              "score": 0.6530487053054957
+            },
+            {
+              "id": "jobs-en",
+              "score": 0.5957268977344282
+            },
+            {
+              "id": "cloud-models-en",
+              "score": 0.42981152505819525
+            },
+            {
+              "id": "threads-en",
+              "score": 0.42349559913093676
+            },
+            {
+              "id": "vector-en",
+              "score": 0.3663032795084129
+            }
+          ]
+        },
+        {
+          "queryId": "q-injection-es",
+          "relevant": [
+            "prompt-injection-es",
+            "prompt-injection-en"
+          ],
+          "top5": [
+            {
+              "id": "prompt-injection-en",
+              "score": 0.6751319269670866
+            },
+            {
+              "id": "prompt-injection-es",
+              "score": 0.5922387606007741
+            },
+            {
+              "id": "xss-en",
+              "score": 0.526224507837333
+            },
+            {
+              "id": "local-models-es",
+              "score": 0.45317987484643957
+            },
+            {
+              "id": "jobs-en",
+              "score": 0.43782907422199346
+            }
+          ]
+        },
+        {
+          "queryId": "q-injection-en",
+          "relevant": [
+            "prompt-injection-en",
+            "prompt-injection-es"
+          ],
+          "top5": [
+            {
+              "id": "prompt-injection-en",
+              "score": 0.5964936711081061
+            },
+            {
+              "id": "prompt-injection-es",
+              "score": 0.4879501863093054
+            },
+            {
+              "id": "threads-en",
+              "score": 0.38360649451293083
+            },
+            {
+              "id": "xss-en",
+              "score": 0.3698438803337038
+            },
+            {
+              "id": "jobs-en",
+              "score": 0.3647301969620499
+            }
+          ]
+        },
+        {
+          "queryId": "q-solar-es",
+          "relevant": [
+            "solar-es",
+            "solar-en"
+          ],
+          "top5": [
+            {
+              "id": "solar-en",
+              "score": 0.5700522668313878
+            },
+            {
+              "id": "solar-es",
+              "score": 0.5287150598872739
+            },
+            {
+              "id": "wind-en",
+              "score": 0.42565522549257206
+            },
+            {
+              "id": "jobs-es",
+              "score": 0.40634729961856314
+            },
+            {
+              "id": "gardening-en",
+              "score": 0.36536763080545465
+            }
+          ]
+        },
+        {
+          "queryId": "q-cooking-en",
+          "relevant": [
+            "cooking-es"
+          ],
+          "top5": [
+            {
+              "id": "cooking-es",
+              "score": 0.47288435012098207
+            },
+            {
+              "id": "gardening-en",
+              "score": 0.3567990373697501
+            },
+            {
+              "id": "vector-en",
+              "score": 0.350602625963908
+            },
+            {
+              "id": "fts-es",
+              "score": 0.3336805538002971
+            },
+            {
+              "id": "local-models-en",
+              "score": 0.32491329070615727
+            }
+          ]
+        },
+        {
+          "queryId": "q-travel-en",
+          "relevant": [
+            "travel-es"
+          ],
+          "top5": [
+            {
+              "id": "travel-es",
+              "score": 0.7000267278810741
+            },
+            {
+              "id": "jobs-es",
+              "score": 0.2830672495327033
+            },
+            {
+              "id": "jobs-en",
+              "score": 0.2540752013981636
+            },
+            {
+              "id": "postgres-en",
+              "score": 0.24504256322231102
+            },
+            {
+              "id": "solar-es",
+              "score": 0.24050607385755582
+            }
+          ]
+        },
+        {
+          "queryId": "q-metadata-es",
+          "relevant": [
+            "metadata-en"
+          ],
+          "top5": [
+            {
+              "id": "metadata-en",
+              "score": 0.5546752269659555
+            },
+            {
+              "id": "fts-es",
+              "score": 0.44199830570964627
+            },
+            {
+              "id": "prompt-injection-en",
+              "score": 0.3817848859025841
+            },
+            {
+              "id": "jobs-en",
+              "score": 0.3666621575003044
+            },
+            {
+              "id": "xss-en",
+              "score": 0.36341785432026724
+            }
+          ]
+        },
+        {
+          "queryId": "q-finance-es",
+          "relevant": [
+            "finance-en"
+          ],
+          "top5": [
+            {
+              "id": "finance-en",
+              "score": 0.6465642741741314
+            },
+            {
+              "id": "hybrid-es",
+              "score": 0.3890463855585933
+            },
+            {
+              "id": "postgres-en",
+              "score": 0.3863791766455809
+            },
+            {
+              "id": "vector-en",
+              "score": 0.37465339415451016
+            },
+            {
+              "id": "fts-es",
+              "score": 0.37178255452176334
+            }
+          ]
+        },
+        {
+          "queryId": "q-health-en",
+          "relevant": [
+            "medical-es"
+          ],
+          "top5": [
+            {
+              "id": "medical-es",
+              "score": 0.563076986095828
+            },
+            {
+              "id": "jobs-en",
+              "score": 0.39703614079961985
+            },
+            {
+              "id": "jobs-es",
+              "score": 0.3757004762155638
+            },
+            {
+              "id": "fts-es",
+              "score": 0.3472820682167326
+            },
+            {
+              "id": "gardening-en",
+              "score": 0.3460515627010391
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

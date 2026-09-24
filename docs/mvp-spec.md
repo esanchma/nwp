@@ -232,6 +232,8 @@ Version 0.7 adds individual Markdown import/export with generated YAML front mat
 
 Version 0.8 adds a versioned OpenAPI 3.1 contract for every `/api/v1` operation, including Bearer authentication, structured errors, filters, and binary transfers. Authenticated clients can retrieve it from `/api/v1/openapi.json`, the trusted web UI links to a public local copy, and automated tests validate the schema and unique operation IDs. Version 0.8.1 adds an offline Swagger UI at `/api-docs`; its assets are embedded in the executable and its Authorize flow supports the generated Bearer token.
 
+Version 0.9 adds a canonical tag taxonomy with aliases and kinds, deterministic page chunks, a durable semantic indexing queue, embedded sqlite-vec loading, Ollama embeddings, and hybrid FTS/vector ranking with lexical fallback. Indexing can run in a separate worker, as a one-shot command, or inside the server. Web, REST/OpenAPI, CLI, and MCP expose taxonomy and index status.
+
 ## Roadmap
 
 The following decisions describe the remaining product vision and do not expand the original MVP scope.

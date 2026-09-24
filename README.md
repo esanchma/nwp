@@ -44,6 +44,15 @@ host = "127.0.0.1"
 port = 3000
 data_dir = "~/.local/share/nwp"
 max_attachment_bytes = 0 # zero means unlimited
+
+[semantic_search]
+enabled = true
+ollama_url = "http://127.0.0.1:11434"
+embedding_model = "bge-m3"
+embedding_dimensions = 1024
+query_prefix = ""
+chunk_characters = 1600
+chunk_overlap = 200
 ```
 
 The server also accepts `--host`, `--port`, `--data-dir`, and `--config`. Command-line values override the configuration file.
@@ -91,6 +100,10 @@ Page commands connect to the running local server and read the generated token a
 ./dist/nwp attachment delete 4
 ./dist/nwp search "installation runtime" --tags "nwp,guide" --status published
 ./dist/nwp tree --status all
+./dist/nwp tag define --tag topic:artificial-intelligence --kind topic --name "Artificial intelligence" --aliases "ai,ia,inteligencia-artificial"
+./dist/nwp tag list
+./dist/nwp index status --json
+./dist/nwp index run
 ./dist/nwp export page 1 --output installation-guide.md
 ./dist/nwp import installation-guide.md
 ./dist/nwp export all --output nwp-export.tar.gz
@@ -117,7 +130,9 @@ Available operations:
 - `GET /api/v1/pages?limit=50&cursor=...`
 - `GET /api/v1/pages/:id-or-alias`
 - `PUT /api/v1/pages/:id`
-- `GET /api/v1/search?q=terms&tags=tag-one,tag-two&status=published&properties={...}`
+- `GET /api/v1/search?q=terms&mode=hybrid&tags=tag-one,tag-two&status=published&properties={...}`
+- `GET|POST /api/v1/tags/definitions`
+- `GET /api/v1/semantic/status`
 - `GET /api/v1/tree?status=published`
 - `GET /api/v1/pages/:id/export`
 - `POST /api/v1/import/pages` with a Markdown request body
@@ -167,6 +182,9 @@ Tools:
 - `search_pages`
 - `update_page`
 - `get_page_tree`
+- `list_tag_definitions`
+- `define_tag`
+- `semantic_index_status`
 - `export_page`
 - `import_page`
 - `get_full_export`
@@ -233,9 +251,19 @@ Restoring a revision first snapshots the current state, so the restoration itsel
 
 ## Search
 
-The search box indexes titles, aliases, Markdown bodies, tags, property keys, and property values through SQLite FTS5. Words are matched as case-insensitive prefixes. Accent variants match when SQLite can remove their diacritics.
+Hybrid search combines SQLite FTS5 results with semantic chunk similarity through sqlite-vec and Reciprocal Rank Fusion. It covers titles, aliases, Markdown bodies, tags, properties, and deterministic page chunks. If Ollama or sqlite-vec is unavailable, nwp returns lexical results with a warning.
 
-Use the advanced search page to require tags, a page state, and exact typed property values. Multiple text words, tags, and properties use AND semantics. Search results use opaque cursors for pagination.
+Semantic indexing is asynchronous and durable. Run a separate `nwp worker`, use `nwp serve --with-worker`, or execute `nwp index run` as a one-shot. Page writes remain immediate while the index catches up. The default embedding model is `bge-m3`; changing model, dimensions, query prefix, or chunk settings queues a complete reindex.
+
+The lexical index uses SQLite FTS5. Words are matched as case-insensitive prefixes. Accent variants match when SQLite can remove their diacritics.
+
+Use the advanced search page to choose hybrid or lexical mode and require tags, a page state, and exact typed property values. Multiple text words, tags, and properties use AND semantics. Search results use opaque cursors for pagination.
+
+## Tag taxonomy
+
+Canonical tags have a kind (`topic`, `entity`, `source`, `type`, or `custom`), display name, optional description, and aliases. Aliases are resolved on page writes and tag-filtered searches. Defining an alias also migrates existing uses to the canonical tag while preserving search and semantic indexing.
+
+Manage the vocabulary at `/taxonomy`, through REST, CLI, or MCP. Existing unclassified tags are migrated as `custom` definitions.
 
 ## Development
 
@@ -253,4 +281,4 @@ The main modules are:
 - `src/mcp.ts`: MCP tools and transport
 - `src/main.ts`: executable and CLI
 
-The approved scope and later roadmap are in [`docs/mvp-spec.md`](docs/mvp-spec.md).
+The approved scope and later roadmap are in [`docs/mvp-spec.md`](docs/mvp-spec.md). The sqlite-vec packaging and Ollama embedding experiments are documented in [`docs/semantic-search-spikes.md`](docs/semantic-search-spikes.md).

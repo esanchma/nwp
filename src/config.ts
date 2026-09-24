@@ -2,6 +2,16 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+export interface SemanticSearchConfig {
+  enabled: boolean;
+  ollamaUrl: string;
+  embeddingModel: string;
+  embeddingDimensions: number;
+  queryPrefix: string;
+  chunkCharacters: number;
+  chunkOverlap: number;
+}
+
 export interface Config {
   host: string;
   port: number;
@@ -10,6 +20,7 @@ export interface Config {
   tokenPath: string;
   configPath: string;
   attachmentMaxBytes: number | null;
+  semanticSearch: SemanticSearchConfig;
 }
 
 export interface ConfigOverrides {
@@ -50,6 +61,20 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
   const dataDir = expandHome(overrides.dataDir ?? stringValue(file.data_dir, "data_dir", defaultDataDir()));
   const configuredMax = numberValue(file.max_attachment_bytes, "max_attachment_bytes", 0);
   const attachmentMaxBytes = configuredMax === 0 ? null : configuredMax;
+  const semantic = objectValue(file.semantic_search, "semantic_search");
+  const semanticSearch: SemanticSearchConfig = {
+    enabled: booleanValue(semantic.enabled, "semantic_search.enabled", true),
+    ollamaUrl: stringValue(semantic.ollama_url, "semantic_search.ollama_url", "http://127.0.0.1:11434"),
+    embeddingModel: stringValue(semantic.embedding_model, "semantic_search.embedding_model", "bge-m3"),
+    embeddingDimensions: numberValue(semantic.embedding_dimensions, "semantic_search.embedding_dimensions", 1024),
+    queryPrefix: stringValue(semantic.query_prefix, "semantic_search.query_prefix", "", true),
+    chunkCharacters: numberValue(semantic.chunk_characters, "semantic_search.chunk_characters", 1600),
+    chunkOverlap: numberValue(semantic.chunk_overlap, "semantic_search.chunk_overlap", 200),
+  };
+
+  if (!Number.isInteger(semanticSearch.embeddingDimensions) || semanticSearch.embeddingDimensions < 1) throw new Error("semantic_search.embedding_dimensions must be a positive integer");
+  if (!Number.isInteger(semanticSearch.chunkCharacters) || semanticSearch.chunkCharacters < 200) throw new Error("semantic_search.chunk_characters must be an integer of at least 200");
+  if (!Number.isInteger(semanticSearch.chunkOverlap) || semanticSearch.chunkOverlap < 0 || semanticSearch.chunkOverlap >= semanticSearch.chunkCharacters) throw new Error("semantic_search.chunk_overlap must be smaller than chunk_characters");
 
   if (attachmentMaxBytes !== null && (!Number.isSafeInteger(attachmentMaxBytes) || attachmentMaxBytes < 1)) {
     throw new Error("max_attachment_bytes must be zero (unlimited) or a positive integer");
@@ -66,13 +91,26 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     tokenPath: join(dataDir, "api-token"),
     configPath,
     attachmentMaxBytes,
+    semanticSearch,
   };
 }
 
-function stringValue(value: unknown, name: string, fallback: string): string {
+function stringValue(value: unknown, name: string, fallback: string, allowEmpty = false): string {
   if (value === undefined) return fallback;
-  if (typeof value !== "string" || value.length === 0) throw new Error(`${name} must be a non-empty string`);
+  if (typeof value !== "string" || (!allowEmpty && value.length === 0)) throw new Error(`${name} must be ${allowEmpty ? "a string" : "a non-empty string"}`);
   return value;
+}
+
+function booleanValue(value: unknown, name: string, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== "boolean") throw new Error(`${name} must be a boolean`);
+  return value;
+}
+
+function objectValue(value: unknown, name: string): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${name} must be a TOML table`);
+  return value as Record<string, unknown>;
 }
 
 function numberValue(value: unknown, name: string, fallback: number): number {

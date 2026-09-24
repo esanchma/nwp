@@ -22,6 +22,7 @@ beforeEach(async () => {
     tokenPath: join(dir, "api-token"),
     configPath: join(dir, "config.toml"),
     attachmentMaxBytes: null,
+    semanticSearch: { enabled: false, ollamaUrl: "http://127.0.0.1:11434", embeddingModel: "bge-m3", embeddingDimensions: 1024, queryPrefix: "", chunkCharacters: 1600, chunkOverlap: 200 },
   };
   store = new PageStore(config.dbPath);
   handler = await createRequestHandler(store, config, token);
@@ -52,7 +53,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.8.1" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.9.0" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });
@@ -77,6 +78,18 @@ describe("HTTP API", () => {
     }));
     expect(updated.status).toBe(200);
     expect((await updated.json() as { body: string }).body).toBe("two");
+  });
+
+  test("manages tag taxonomy and semantic status through the API", async () => {
+    const defined = await handler(api("/api/v1/tags/definitions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag: "topic:ai", kind: "topic", displayName: "Artificial intelligence", aliases: ["ia"] }) }));
+    expect(defined.status).toBe(201);
+    const page = store.create({ title: "Tagged", body: "", tags: ["ia"] }, "web");
+    expect(page.tags).toEqual(["topic:ai"]);
+    const tags = await (await handler(api("/api/v1/tags/definitions"))).json() as { tags: Array<{ tag: string; usageCount: number }> };
+    expect(tags.tags.find(({ tag }) => tag === "topic:ai")?.usageCount).toBe(1);
+    const status = await (await handler(api("/api/v1/semantic/status"))).json() as { enabled: boolean; pendingPages: number };
+    expect(status.enabled).toBe(false);
+    expect(status.pendingPages).toBeGreaterThan(0);
   });
 
   test("searches through the API", async () => {
@@ -189,7 +202,7 @@ describe("HTTP API", () => {
     }));
     expect(toolsResponse.status).toBe(200);
     const tools = await toolsResponse.json() as { result: { tools: Array<{ name: string }> } };
-    expect(tools.result.tools.map(({ name }) => name).sort()).toEqual(["create_page", "delete_attachment", "delete_page", "export_page", "get_attachment", "get_attachment_upload_instructions", "get_deleted_page", "get_full_export", "get_page", "get_page_tree", "get_revision_diff", "import_page", "list_attachments", "list_pages", "list_revisions", "list_trash", "purge_page", "restore_page", "restore_revision", "search_pages", "update_page"]);
+    expect(tools.result.tools.map(({ name }) => name).sort()).toEqual(["create_page", "define_tag", "delete_attachment", "delete_page", "export_page", "get_attachment", "get_attachment_upload_instructions", "get_deleted_page", "get_full_export", "get_page", "get_page_tree", "get_revision_diff", "import_page", "list_attachments", "list_pages", "list_revisions", "list_tag_definitions", "list_trash", "purge_page", "restore_page", "restore_revision", "search_pages", "semantic_index_status", "update_page"]);
   });
 });
 

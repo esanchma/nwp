@@ -102,6 +102,8 @@ export interface SearchResult extends PageSummary {
 export interface SearchResults {
   pages: SearchResult[];
   nextCursor: string | null;
+  mode?: "lexical" | "hybrid";
+  warning?: string;
 }
 
 export interface RevisionSummary {
@@ -130,6 +132,29 @@ export interface TreeEntry extends PageReference {
   status: PageStatus;
   parentId: number | null;
   depth: number;
+}
+
+export type TagKind = "topic" | "entity" | "source" | "type" | "custom";
+
+export interface TagDefinition {
+  tag: string;
+  kind: TagKind;
+  displayName: string;
+  description: string | null;
+  createdBy: "human" | "model" | "migration";
+  aliases: string[];
+  usageCount: number;
+  createdAt: string;
+}
+
+export interface SemanticStatus {
+  enabled: boolean;
+  vectorAvailable: boolean;
+  model: string;
+  dimensions: number;
+  pendingPages: number;
+  indexedPages: number;
+  lastError: string | null;
 }
 
 export class AppError extends Error {

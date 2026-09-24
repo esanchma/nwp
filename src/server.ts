@@ -11,11 +11,13 @@ import { escapeHtml, renderMarkdown } from "./markdown.ts";
 import { createMcpHandler } from "./mcp.ts";
 import { openApiJson } from "./openapi.ts";
 import { createFullExport, exportPageMarkdown, importPageMarkdown } from "./transfer.ts";
+import { hybridSearch, OllamaEmbedder } from "./semantic.ts";
 
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024 + 64 * 1024;
 
 export async function createRequestHandler(store: PageStore, config: Config, apiToken: string): Promise<(request: Request) => Promise<Response>> {
-  const handleMcp = await createMcpHandler(store);
+  const handleMcp = await createMcpHandler(store, config.semanticSearch);
+  const embedder = config.semanticSearch.enabled ? new OllamaEmbedder(config.semanticSearch) : null;
   const allowedHosts = new Set([`${config.host}:${config.port}`, `localhost:${config.port}`, `127.0.0.1:${config.port}`]);
 
   return async (request: Request): Promise<Response> => {
@@ -48,17 +50,18 @@ export async function createRequestHandler(store: PageStore, config: Config, api
       if (url.pathname.startsWith("/api/v1")) {
         requireBearer(request, apiToken);
         rejectCrossOrigin(request, url);
-        return await apiRoute(request, url, store, config.attachmentMaxBytes);
+        return await apiRoute(request, url, store, config, embedder);
       }
 
-      return await webRoute(request, url, store, config.attachmentMaxBytes);
+      return await webRoute(request, url, store, config, embedder);
     } catch (error) {
       return errorResponse(error, request.url.startsWith("http") && new URL(request.url).pathname.startsWith("/api/"));
     }
   };
 }
 
-async function apiRoute(request: Request, url: URL, store: PageStore, attachmentMaxBytes: number | null): Promise<Response> {
+async function apiRoute(request: Request, url: URL, store: PageStore, config: Config, embedder: OllamaEmbedder | null): Promise<Response> {
+  const attachmentMaxBytes = config.attachmentMaxBytes;
   const pageMatch = /^\/api\/v1\/pages\/(\d+|[a-z0-9][a-z0-9-]*)$/.exec(url.pathname);
   const revisionsMatch = /^\/api\/v1\/pages\/(\d+)\/revisions$/.exec(url.pathname);
   const revisionMatch = /^\/api\/v1\/pages\/(\d+)\/revisions\/(\d+)$/.exec(url.pathname);
@@ -123,12 +126,22 @@ async function apiRoute(request: Request, url: URL, store: PageStore, attachment
     return json(store.getRevision(Number(revisionMatch[1]), Number(revisionMatch[2])));
   }
 
+  if (request.method === "GET" && url.pathname === "/api/v1/semantic/status") return json(store.semanticStatus(config.semanticSearch.enabled, config.semanticSearch.embeddingModel, config.semanticSearch.embeddingDimensions));
+  if (request.method === "GET" && url.pathname === "/api/v1/tags/definitions") return json({ tags: store.listTagDefinitions() });
+  if (request.method === "POST" && url.pathname === "/api/v1/tags/definitions") {
+    const body = await readJson(request) as Record<string, unknown>;
+    const kind = tagKind(body.kind);
+    if (typeof body.tag !== "string" || typeof body.displayName !== "string") throw new AppError("invalid_tag_definition", "tag and displayName are required", 400);
+    if (body.aliases !== undefined && (!Array.isArray(body.aliases) || body.aliases.some((alias) => typeof alias !== "string"))) throw new AppError("invalid_tag_definition", "aliases must be strings", 400);
+    return json(store.defineTag(body.tag, kind, body.displayName, body.aliases as string[] | undefined, typeof body.description === "string" ? body.description : null), 201);
+  }
+
   if (request.method === "GET" && url.pathname === "/api/v1/search") {
     const limit = numberParam(url.searchParams.get("limit"), 20);
     const tags = (url.searchParams.get("tags") ?? "").split(",").filter(Boolean);
     const status = statusParam(url.searchParams.get("status"), "published");
     const properties = parsePropertiesInput(url.searchParams.get("properties") ?? "{}");
-    return json(store.search(url.searchParams.get("q") ?? "", tags, url.searchParams.get("cursor"), limit, status, properties));
+    return json(await searchWithFallback(store, embedder, url.searchParams.get("mode"), url.searchParams.get("q") ?? "", tags, url.searchParams.get("cursor"), limit, status, properties, request.signal));
   }
   if (request.method === "GET" && url.pathname === "/api/v1/tree") {
     return json({ pages: store.tree(statusParam(url.searchParams.get("status"), "published")) });
@@ -162,7 +175,8 @@ async function apiRoute(request: Request, url: URL, store: PageStore, attachment
   throw new AppError("not_found", "endpoint not found", 404);
 }
 
-async function webRoute(request: Request, url: URL, store: PageStore, attachmentMaxBytes: number | null): Promise<Response> {
+async function webRoute(request: Request, url: URL, store: PageStore, config: Config, embedder: OllamaEmbedder | null): Promise<Response> {
+  const attachmentMaxBytes = config.attachmentMaxBytes;
   rejectCrossOrigin(request, url);
   const csrf = csrfFor(request);
   const headers = csrfHeaders(request, csrf);
@@ -182,8 +196,9 @@ async function webRoute(request: Request, url: URL, store: PageStore, attachment
     const status = statusParam(url.searchParams.get("status"), "published");
     const propertiesText = url.searchParams.get("properties") ?? "";
     const properties = propertiesText.trim() ? parsePropertiesInput(propertiesText) : {};
-    const results = query.trim() || tags.length || Object.keys(properties).length ? store.search(query, tags, url.searchParams.get("cursor"), 20, status, properties) : null;
-    return html(layout("Search", searchView(query, tagsText, status, propertiesText, results), csrf), 200, headers);
+    const mode = url.searchParams.get("mode") === "lexical" ? "lexical" : "hybrid";
+    const results = query.trim() || tags.length || Object.keys(properties).length ? await searchWithFallback(store, embedder, mode, query, tags, url.searchParams.get("cursor"), 20, status, properties, request.signal) : null;
+    return html(layout("Search", searchView(query, tagsText, status, propertiesText, mode, results), csrf), 200, headers);
   }
   if (request.method === "GET" && url.pathname === "/tree") {
     const status = statusParam(url.searchParams.get("status"), "published");
@@ -220,6 +235,16 @@ async function webRoute(request: Request, url: URL, store: PageStore, attachment
     const fields = await readForm(request);
     const page = store.create(formPage(fields), "web");
     return redirect(`/wiki/${encodeURIComponent(page.alias)}`);
+  }
+  if (request.method === "GET" && url.pathname === "/taxonomy") {
+    const items = store.listTagDefinitions().map((tag) => `<tr><td><a href="/tags/${encodeURIComponent(tag.tag)}">${escapeHtml(tag.tag)}</a></td><td>${escapeHtml(tag.kind)}</td><td>${escapeHtml(tag.displayName)}</td><td>${tag.usageCount}</td><td>${escapeHtml(tag.aliases.join(", "))}</td></tr>`).join("");
+    return html(layout("Tag taxonomy", `<h1>Tag taxonomy</h1><form method="post" action="/taxonomy"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><div class="form-grid"><label>Canonical tag<input name="tag" required></label><label>Kind<select name="kind"><option>topic</option><option>entity</option><option>source</option><option>type</option><option>custom</option></select></label></div><label>Display name<input name="displayName" required></label><label>Aliases <small>comma-separated</small><input name="aliases"></label><label>Description<input name="description"></label><button type="submit">Save tag</button></form>${items ? `<table><thead><tr><th>Tag</th><th>Kind</th><th>Name</th><th>Uses</th><th>Aliases</th></tr></thead><tbody>${items}</tbody></table>` : "<p>No tag definitions yet.</p>"}`, csrf), 200, headers);
+  }
+  if (request.method === "POST" && url.pathname === "/taxonomy") {
+    await verifyCsrf(request);
+    const fields = await readForm(request);
+    store.defineTag(String(fields.get("tag") ?? ""), tagKind(fields.get("kind")), String(fields.get("displayName") ?? ""), String(fields.get("aliases") ?? "").split(","), String(fields.get("description") ?? "") || null);
+    return redirect("/taxonomy");
   }
   if (request.method === "GET" && url.pathname === "/tags") {
     const items = store.listTags().map(({ tag, count }) => `<li><a href="/tags/${encodeURIComponent(tag)}">${escapeHtml(tag)}</a> <small>${count}</small></li>`).join("");
@@ -406,20 +431,22 @@ function pageList(title: string, pages: PageSummary[], empty: string): string {
   return `<h1>${title}</h1>${items ? `<ul class="page-list">${items}</ul>` : `<p>${empty}</p>`}`;
 }
 
-function searchView(query: string, tags: string, status: PageStatus | "all", properties: string, results: ReturnType<PageStore["search"]> | null): string {
+function searchView(query: string, tags: string, status: PageStatus | "all", properties: string, mode: "hybrid" | "lexical", results: ReturnType<PageStore["search"]> | null): string {
   const form = `<h1>Search</h1><form class="search-page" method="get" action="/search">
     <label>Text<input type="search" name="q" value="${escapeHtml(query)}" autofocus></label>
     <label>Tags <small>comma-separated; all must match</small><input name="tags" value="${escapeHtml(tags)}"></label>
     <label>Status<select name="status">${statusOptions(status, true)}</select></label>
+    <label>Mode<select name="mode"><option value="hybrid"${mode === "hybrid" ? " selected" : ""}>Hybrid</option><option value="lexical"${mode === "lexical" ? " selected" : ""}>Lexical</option></select></label>
     <label>Properties <small>JSON object, exact values</small><input name="properties" value="${escapeHtml(properties)}" placeholder='{"owner":"team"}'></label>
     <button type="submit">Search</button>
   </form>`;
   if (!results) return `${form}<p>Enter text, tags, or both.</p>`;
   const items = results.pages.map((page) => `<li><a href="/wiki/${encodeURIComponent(page.alias)}">${escapeHtml(page.title)}</a><small>${escapeHtml(page.alias)} · ${formatDate(page.updatedAt)}</small>${page.excerpt ? `<p>${escapeHtml(page.excerpt)}</p>` : ""}</li>`).join("");
   const next = results.nextCursor
-    ? `<p><a class="button secondary" href="/search?${new URLSearchParams({ q: query, tags, status, properties, cursor: results.nextCursor }).toString()}">More results</a></p>`
+    ? `<p><a class="button secondary" href="/search?${new URLSearchParams({ q: query, tags, status, mode, properties, cursor: results.nextCursor }).toString()}">More results</a></p>`
     : "";
-  return `${form}${items ? `<ul class="page-list search-results">${items}</ul>${next}` : "<p>No matching pages.</p>"}`;
+  const notice = results.warning ? `<p class="notice">${escapeHtml(results.warning)}</p>` : `<p><small>Search mode: ${results.mode ?? "lexical"}</small></p>`;
+  return `${form}${notice}${items ? `<ul class="page-list search-results">${items}</ul>${next}` : "<p>No matching pages.</p>"}`;
 }
 
 function pageForm(page: Pick<Page, "title" | "alias" | "body" | "tags" | "status" | "parentId" | "properties">, csrf: string, parents: Array<{ id: number; title: string }>): string {
@@ -453,12 +480,17 @@ function formPage(form: FormData) {
 }
 
 function layout(title: string, body: string, csrf: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="csrf-token" content="${escapeHtml(csrf)}"><link rel="icon" href="/logo.svg" type="image/svg+xml"><title>${escapeHtml(title)} · nwp</title><style>${CSS}</style></head><body><header class="site-header"><nav><a class="brand" href="/"><img src="/logo.svg" width="34" height="34" alt="">nwp</a><form class="nav-search" action="/search" method="get"><label class="sr-only" for="nav-query">Search pages</label><input id="nav-query" type="search" name="q" placeholder="Search" aria-label="Search pages"></form><a href="/pages">Pages</a><a href="/tree">Tree</a><a href="/tags">Tags</a><a href="/trash">Trash</a><a href="/api-docs">API</a><a href="/import">Import</a><a href="/export/all">Export all</a><a class="button" href="/new">New page</a></nav></header><main>${body}</main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="csrf-token" content="${escapeHtml(csrf)}"><link rel="icon" href="/logo.svg" type="image/svg+xml"><title>${escapeHtml(title)} · nwp</title><style>${CSS}</style></head><body><header class="site-header"><nav><a class="brand" href="/"><img src="/logo.svg" width="34" height="34" alt="">nwp</a><form class="nav-search" action="/search" method="get"><label class="sr-only" for="nav-query">Search pages</label><input id="nav-query" type="search" name="q" placeholder="Search" aria-label="Search pages"></form><a href="/pages">Pages</a><a href="/tree">Tree</a><a href="/tags">Tags</a><a href="/taxonomy">Taxonomy</a><a href="/trash">Trash</a><a href="/api-docs">API</a><a href="/import">Import</a><a href="/export/all">Export all</a><a class="button" href="/new">New page</a></nav></header><main>${body}</main></body></html>`;
 }
 
 const CSS = `
 :root{color-scheme:light dark;--bg:#fff;--fg:#202124;--muted:#667085;--line:#d0d5dd;--accent:#175cd3;--soft:#eff4ff;--missing:#b42318} @media(prefers-color-scheme:dark){:root{--bg:#111318;--fg:#f2f4f7;--muted:#98a2b3;--line:#344054;--accent:#84adff;--soft:#182230;--missing:#f97066}} *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,sans-serif} a{color:var(--accent)} a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid var(--accent);outline-offset:2px}.site-header{border-bottom:1px solid var(--line)}.site-header nav,main{max-width:900px;margin:auto;padding:1rem}.site-header nav{display:flex;align-items:center;gap:1rem}.brand{display:flex;align-items:center;gap:.55rem;font-size:1.4rem;font-weight:800;text-decoration:none}.brand img{border-radius:9px;box-shadow:0 3px 10px #312e8140}.nav-search{margin-left:auto}.nav-search input{width:13rem;margin:0;padding:.42rem .6rem}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.button,button{display:inline-block;border:0;border-radius:.4rem;background:var(--accent);color:var(--bg);padding:.45rem .8rem;text-decoration:none;font:inherit;font-weight:700;cursor:pointer}.danger{background:var(--missing);color:#fff}.secondary{background:var(--soft);color:var(--accent)}h1,h2,h3{line-height:1.25}.page-header{display:flex;align-items:start;justify-content:space-between;gap:1rem}.page-list{list-style:none;padding:0}.page-list li{border-bottom:1px solid var(--line);padding:.7rem 0}.page-list small{display:block;color:var(--muted)}label{display:block;font-weight:700;margin:1rem 0}label small{font-weight:400;color:var(--muted)}input,textarea,select{display:block;width:100%;margin-top:.3rem;padding:.65rem;border:1px solid var(--line);border-radius:.3rem;background:var(--bg);color:var(--fg);font:inherit}textarea{font-family:ui-monospace,monospace;resize:vertical}.page-actions{display:flex;gap:.5rem}.form-grid{display:grid;grid-template-columns:1fr 2fr;gap:1rem}.search-page{display:grid;grid-template-columns:2fr 1fr 1fr 2fr auto;align-items:end;gap:.75rem;margin-bottom:2rem}.search-page label{margin:0}.search-page button{margin-bottom:0}.search-results p{margin:.25rem 0;color:var(--muted)}.metadata-diff,.code-diff{width:100%;border-collapse:collapse}.metadata-diff th,.metadata-diff td,.code-diff th,.code-diff td{border:1px solid var(--line);padding:.35rem .55rem;text-align:left}.metadata-diff .changed{background:color-mix(in srgb,var(--missing) 12%,var(--bg))}.diff-scroll{overflow:auto}.code-diff{table-layout:fixed;min-width:720px;font-size:.875rem}.code-diff .line-no{width:3rem;text-align:right;color:var(--muted);user-select:none}.code-diff code{white-space:pre-wrap;overflow-wrap:anywhere}.diff-removed{background:#fee2e2;color:#7f1d1d}.diff-added{background:#dcfce7;color:#14532d}.diff-blank{background:var(--soft)}@media(prefers-color-scheme:dark){.diff-removed{background:#450a0a;color:#fecaca}.diff-added{background:#052e16;color:#bbf7d0}}.warning{color:var(--missing);font-weight:700}.status-nav{display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:1rem}.status{font-size:.7em;text-transform:uppercase;letter-spacing:.04em;padding:.15rem .4rem;border-radius:1rem;background:var(--soft);vertical-align:middle}.status-draft{color:#b54708}.status-archived{color:var(--muted)}.breadcrumbs{padding:0;margin:0 0 1rem;color:var(--muted)}.properties{margin-top:2rem}.properties table{border-collapse:collapse}.properties th,.properties td{border:1px solid var(--line);padding:.3rem .6rem;text-align:left}.tree{list-style:none;padding:0}.tree li{padding:.3rem 0 .3rem calc(var(--depth) * 1.5rem)}.attachments ul{list-style:none;padding:0}.attachments li{display:flex;align-items:center;gap:.8rem;border-bottom:1px solid var(--line);padding:.65rem 0}.attachments li>div{flex:1}.attachments small{display:block;color:var(--muted)}.attachment-preview{display:block;width:72px;height:54px;object-fit:cover;border-radius:.35rem;border:1px solid var(--line)}.attachment-upload{display:flex;align-items:end;gap:.75rem}.attachment-upload label{flex:1}.link-danger{padding:.2rem;background:transparent;color:var(--missing)}.status-deleted,.deleted{color:var(--missing);font-weight:700;text-decoration-style:dashed}.tag{display:inline-block;padding:.1rem .45rem;border-radius:1rem;background:var(--soft);text-decoration:none;font-size:.9rem}.missing{color:var(--missing);text-decoration-style:dotted}.markdown{overflow-wrap:anywhere}.markdown pre{overflow:auto;padding:1rem;background:var(--soft);border-radius:.4rem}.markdown table{border-collapse:collapse}.markdown th,.markdown td{border:1px solid var(--line);padding:.35rem .6rem}aside{margin-top:3rem;border-top:1px solid var(--line)}@media(max-width:700px){.site-header nav{flex-wrap:wrap}.nav-search{order:5;width:100%;margin:0}.nav-search input{width:100%}.search-page{grid-template-columns:1fr}.page-header{display:block}.page-header .button{margin-top:.5rem}}
 `;
+
+function tagKind(value: unknown): "topic" | "entity" | "source" | "type" | "custom" {
+  if (value === "topic" || value === "entity" || value === "source" || value === "type" || value === "custom") return value;
+  throw new AppError("invalid_tag_kind", "tag kind must be topic, entity, source, type, or custom", 400);
+}
 
 function statusParam(value: string | null, fallback: PageStatus | "all"): PageStatus | "all" {
   const status = value || fallback;
@@ -567,6 +599,35 @@ function swaggerUiResponse(): Response {
 
 function staticAssetResponse(body: string, contentType: string): Response {
   return new Response(body, { headers: { "Content-Type": contentType, "Cache-Control": "public, max-age=86400", "X-Content-Type-Options": "nosniff" } });
+}
+
+async function searchWithFallback(
+  store: PageStore,
+  embedder: OllamaEmbedder | null,
+  requestedMode: string | null,
+  query: string,
+  tags: string[],
+  cursor: string | null,
+  limit: number,
+  status: PageStatus | "all",
+  properties: PageProperties,
+  signal: AbortSignal,
+) {
+  if (requestedMode === "lexical" || !query.trim()) return { ...store.search(query, tags, cursor, limit, status, properties), mode: "lexical" as const };
+  if (!embedder) return { ...store.search(query, tags, cursor, limit, status, properties), mode: "lexical" as const, warning: "Semantic search is disabled; showing lexical results." };
+  const semanticState = store.semanticStatus(true, "", 0);
+  if (!semanticState.vectorAvailable || semanticState.indexedPages === 0) {
+    const reason = !semanticState.vectorAvailable ? "sqlite-vec is unavailable" : "no pages have been indexed yet";
+    return { ...store.search(query, tags, cursor, limit, status, properties), mode: "lexical" as const, warning: `Semantic search unavailable (${reason}); showing lexical results.` };
+  }
+  try {
+    const result = await hybridSearch(store, embedder, query, tags, cursor, limit, status, properties, signal);
+    const pending = store.semanticStatus(true, "", 0).pendingPages;
+    return pending > 0 ? { ...result, warning: `${pending} page${pending === 1 ? " is" : "s are"} still pending semantic indexing.` } : result;
+  } catch (error) {
+    if (error instanceof AppError && error.code === "invalid_cursor") throw error;
+    return { ...store.search(query, tags, null, limit, status, properties), mode: "lexical" as const, warning: `Semantic search unavailable; showing lexical results. ${error instanceof Error ? error.message : String(error)}` };
+  }
 }
 
 function openApiResponse(): Response {

@@ -190,6 +190,16 @@ describe("PageStore", () => {
     const original = await store();
     const dbPath = original.db.filename;
     original.create({ title: "Before Migration", body: "legacy searchable text", tags: [] }, "web");
+    original.db.run("DROP TRIGGER pages_semantic_insert");
+    original.db.run("DROP TRIGGER pages_semantic_update");
+    original.db.run("DROP TRIGGER page_tags_define");
+    original.db.run("DROP TABLE semantic_index_queue");
+    original.db.run("DROP TABLE chunk_embeddings");
+    original.db.run("DROP TABLE page_chunks");
+    original.db.run("DROP TABLE semantic_page_index");
+    original.db.run("DROP TABLE semantic_index_config");
+    original.db.run("DROP TABLE tag_aliases");
+    original.db.run("DROP TABLE tag_definitions");
     original.db.run("DROP TABLE page_attachments");
     original.db.run("DROP TABLE attachment_blobs");
     original.db.run("DROP TABLE page_properties");

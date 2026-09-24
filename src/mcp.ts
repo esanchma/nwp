@@ -1,14 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
+import type { SemanticSearchConfig } from "./config.ts";
 import type { PageStore } from "./database.ts";
 import { compareRevision } from "./history.ts";
 import type { Attachment } from "./domain.ts";
 import { exportPageMarkdown, importPageMarkdown } from "./transfer.ts";
+import { hybridSearch, OllamaEmbedder } from "./semantic.ts";
 
-export function createMcpHandler(store: PageStore): (request: Request) => Promise<Response> {
+export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSearchConfig): (request: Request) => Promise<Response> {
   return async (request) => {
-    const server = createServer(store);
+    const server = createServer(store, semanticConfig);
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
@@ -19,8 +21,9 @@ export function createMcpHandler(store: PageStore): (request: Request) => Promis
   };
 }
 
-function createServer(store: PageStore): McpServer {
-  const server = new McpServer({ name: "nwp", version: "0.8.1" });
+function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig): McpServer {
+  const embedder = semanticConfig?.enabled ? new OllamaEmbedder(semanticConfig) : null;
+  const server = new McpServer({ name: "nwp", version: "0.9.0" });
   const statusSchema = z.enum(["draft", "published", "archived"]);
   const statusFilterSchema = z.enum(["draft", "published", "archived", "all"]);
   const propertiesSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]));
@@ -74,9 +77,16 @@ function createServer(store: PageStore): McpServer {
         limit: z.number().int().min(1).max(100).default(20),
         status: statusFilterSchema.default("published"),
         properties: propertiesSchema.default({}),
+        mode: z.enum(["hybrid", "lexical"]).default("hybrid"),
       },
     },
-    async ({ query, tags, cursor, limit, status, properties }) => toolResult(store.search(query, tags, cursor ?? null, limit, status, properties)),
+    async ({ query, tags, cursor, limit, status, properties, mode }) => {
+      if (mode === "lexical" || !query.trim() || !embedder) return toolResult({ ...store.search(query, tags, cursor ?? null, limit, status, properties), mode: "lexical", ...(!embedder && mode === "hybrid" ? { warning: "Semantic search is disabled." } : {}) });
+      const semanticState = store.semanticStatus(true, semanticConfig!.embeddingModel, semanticConfig!.embeddingDimensions);
+      if (!semanticState.vectorAvailable || semanticState.indexedPages === 0) return toolResult({ ...store.search(query, tags, cursor ?? null, limit, status, properties), mode: "lexical", warning: "Semantic index is unavailable or empty." });
+      try { return toolResult(await hybridSearch(store, embedder, query, tags, cursor ?? null, limit, status, properties)); }
+      catch (error) { return toolResult({ ...store.search(query, tags, null, limit, status, properties), mode: "lexical", warning: `Semantic search unavailable: ${error instanceof Error ? error.message : String(error)}` }); }
+    },
   );
 
   server.registerTool(
@@ -87,6 +97,27 @@ function createServer(store: PageStore): McpServer {
       annotations: { readOnlyHint: true },
     },
     async ({ status }) => toolResult({ pages: store.tree(status) }),
+  );
+
+  server.registerTool(
+    "list_tag_definitions",
+    { description: "List canonical tags, kinds, aliases, and usage counts", inputSchema: {}, annotations: { readOnlyHint: true } },
+    async () => toolResult({ tags: store.listTagDefinitions() }),
+  );
+
+  server.registerTool(
+    "define_tag",
+    {
+      description: "Create or update a canonical tag and its aliases",
+      inputSchema: { tag: z.string(), kind: z.enum(["topic", "entity", "source", "type", "custom"]), display_name: z.string(), aliases: z.array(z.string()).default([]), description: z.string().nullable().default(null) },
+    },
+    async ({ tag, kind, display_name, aliases, description }) => toolResult(store.defineTag(tag, kind, display_name, aliases, description)),
+  );
+
+  server.registerTool(
+    "semantic_index_status",
+    { description: "Get semantic indexing availability and queue status", inputSchema: {}, annotations: { readOnlyHint: true } },
+    async () => toolResult(store.semanticStatus(semanticConfig?.enabled ?? false, semanticConfig?.embeddingModel ?? "", semanticConfig?.embeddingDimensions ?? 0)),
   );
 
   server.registerTool(

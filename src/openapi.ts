@@ -13,7 +13,7 @@ export const openApiDocument = {
   openapi: "3.1.0",
   info: {
     title: "nwp JSON API",
-    version: "0.8.1",
+    version: "0.9.0",
     description: "Local API for nano-wiki-pi. SQLite metadata is authoritative and every endpoint requires the generated Bearer token.",
     license: { name: "MIT", identifier: "MIT" },
   },
@@ -21,7 +21,7 @@ export const openApiDocument = {
   security: [{ bearerAuth: [] }],
   tags: [
     { name: "Pages" }, { name: "Search" }, { name: "History" }, { name: "Trash" },
-    { name: "Attachments" }, { name: "Transfer" }, { name: "Contract" },
+    { name: "Attachments" }, { name: "Transfer" }, { name: "Taxonomy" }, { name: "Semantic" }, { name: "Contract" },
   ],
   paths: {
     "/openapi.json": {
@@ -52,6 +52,13 @@ export const openApiDocument = {
       },
       delete: { tags: ["Trash"], operationId: "deletePage", summary: "Move a page to trash by numeric ID", responses: { "200": response("Deleted page", ref("DeletedPage")), ...errorResponses } },
     },
+    "/tags/definitions": {
+      get: { tags: ["Taxonomy"], operationId: "listTagDefinitions", summary: "List canonical tags, aliases, kinds, and usage", responses: { "200": response("Tag definitions", { type: "object", required: ["tags"], properties: { tags: { type: "array", items: ref("TagDefinition") } } }), ...errorResponses } },
+      post: { tags: ["Taxonomy"], operationId: "defineTag", summary: "Create or update a canonical tag", requestBody: { required: true, content: json({ type: "object", required: ["tag", "kind", "displayName"], properties: { tag: { type: "string" }, kind: { type: "string", enum: ["topic", "entity", "source", "type", "custom"] }, displayName: { type: "string" }, description: { type: ["string", "null"] }, aliases: { type: "array", items: { type: "string" } } } }) }, responses: { "201": response("Canonical tag", ref("TagDefinition")), ...errorResponses } },
+    },
+    "/semantic/status": {
+      get: { tags: ["Semantic"], operationId: "getSemanticStatus", summary: "Get semantic extension and indexing queue status", responses: { "200": response("Semantic status", ref("SemanticStatus")), ...errorResponses } },
+    },
     "/search": {
       get: {
         tags: ["Search"], operationId: "searchPages", summary: "Search page text, tags, state, and scalar properties",
@@ -59,6 +66,7 @@ export const openApiDocument = {
           { name: "q", in: "query", schema: { type: "string" } },
           { name: "tags", in: "query", description: "Comma-separated tags with AND semantics", schema: { type: "string" } },
           { name: "properties", in: "query", description: "JSON object of exact typed property filters", schema: { type: "string" } },
+          { name: "mode", in: "query", description: "Hybrid falls back to lexical with a warning", schema: { type: "string", enum: ["hybrid", "lexical"], default: "hybrid" } },
           { $ref: "#/components/parameters/StatusFilter" }, { $ref: "#/components/parameters/Cursor" }, { $ref: "#/components/parameters/Limit" },
         ],
         responses: { "200": response("Search results", ref("SearchResults")), ...errorResponses },
@@ -184,7 +192,9 @@ export const openApiDocument = {
       } },
       PageList: { type: "object", required: ["pages", "nextCursor"], properties: { pages: { type: "array", items: ref("PageSummary") }, nextCursor: { type: ["string", "null"] } } },
       SearchResult: { allOf: [ref("PageSummary"), { type: "object", required: ["excerpt"], properties: { excerpt: { type: "string" } } }] },
-      SearchResults: { type: "object", required: ["pages", "nextCursor"], properties: { pages: { type: "array", items: ref("SearchResult") }, nextCursor: { type: ["string", "null"] } } },
+      SearchResults: { type: "object", required: ["pages", "nextCursor"], properties: { pages: { type: "array", items: ref("SearchResult") }, nextCursor: { type: ["string", "null"] }, mode: { type: "string", enum: ["hybrid", "lexical"] }, warning: { type: "string" } } },
+      TagDefinition: { type: "object", required: ["tag", "kind", "displayName", "description", "createdBy", "aliases", "usageCount", "createdAt"], properties: { tag: { type: "string" }, kind: { type: "string", enum: ["topic", "entity", "source", "type", "custom"] }, displayName: { type: "string" }, description: { type: ["string", "null"] }, createdBy: { type: "string", enum: ["human", "model", "migration"] }, aliases: { type: "array", items: { type: "string" } }, usageCount: { type: "integer" }, createdAt: { type: "string", format: "date-time" } } },
+      SemanticStatus: { type: "object", required: ["enabled", "vectorAvailable", "model", "dimensions", "pendingPages", "indexedPages", "lastError"], properties: { enabled: { type: "boolean" }, vectorAvailable: { type: "boolean" }, model: { type: "string" }, dimensions: { type: "integer" }, pendingPages: { type: "integer" }, indexedPages: { type: "integer" }, lastError: { type: ["string", "null"] } } },
       TreeEntry: { allOf: [ref("PageReference"), { type: "object", required: ["status", "parentId", "depth"], properties: { status: ref("PageStatus"), parentId: { type: ["integer", "null"] }, depth: { type: "integer", minimum: 0 } } }] },
       RevisionSummary: { type: "object", required: ["id", "pageId", "title", "alias", "tags", "status", "parentId", "properties", "source", "createdAt"], properties: {
         id: { type: "integer" }, pageId: { type: "integer" }, title: { type: "string" }, alias: { type: "string" }, tags: { type: "array", items: { type: "string" } }, status: ref("PageStatus"), parentId: { type: ["integer", "null"] }, properties: ref("Properties"), source: { type: "string", enum: ["web", "api", "cli", "mcp"] }, createdAt: { type: "string", format: "date-time" },

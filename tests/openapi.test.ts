@@ -3,9 +3,9 @@ import SwaggerParser from "@apidevtools/swagger-parser";
 import { openApiDocument, openApiJson } from "../src/openapi.ts";
 
 const expectedOperations = [
-  "createPage", "deleteAttachment", "deletePage", "downloadAttachment", "exportPage", "exportWiki",
-  "getAttachment", "getDeletedPage", "getOpenApiDocument", "getPage", "getPageTree", "getRevision",
-  "getRevisionDiff", "importPage", "listAttachments", "listPages", "listRevisions", "listTrash",
+  "createPage", "defineTag", "deleteAttachment", "deletePage", "downloadAttachment", "exportPage", "exportWiki",
+  "getAttachment", "getDeletedPage", "getOpenApiDocument", "getPage", "getPageTree", "getRevision", "getSemanticStatus",
+  "getRevisionDiff", "importPage", "listAttachments", "listPages", "listRevisions", "listTagDefinitions", "listTrash",
   "purgePage", "restoreDeletedPage", "restoreRevision", "searchPages", "updatePage", "uploadAttachment",
 ];
 
@@ -13,7 +13,7 @@ describe("OpenAPI contract", () => {
   test("is a valid OpenAPI 3.1 document", async () => {
     const validated = await SwaggerParser.validate(structuredClone(openApiDocument) as never) as unknown as { openapi: string; info: { version: string } };
     expect(validated.openapi).toBe("3.1.0");
-    expect(validated.info.version).toBe("0.8.1");
+    expect(validated.info.version).toBe("0.9.0");
   });
 
   test("documents every JSON API operation with unique operation IDs", () => {
@@ -30,7 +30,7 @@ describe("OpenAPI contract", () => {
   test("serializes deterministic JSON", () => {
     const parsed = JSON.parse(openApiJson()) as { openapi: string; paths: object };
     expect(parsed.openapi).toBe("3.1.0");
-    expect(Object.keys(parsed.paths)).toHaveLength(18);
+    expect(Object.keys(parsed.paths)).toHaveLength(20);
     expect(openApiJson().endsWith("\n")).toBe(true);
   });
 });
