@@ -13,7 +13,7 @@ export const openApiDocument = {
   openapi: "3.1.0",
   info: {
     title: "nwp JSON API",
-    version: "0.9.0",
+    version: "0.10.0",
     description: "Local API for nano-wiki-pi. SQLite metadata is authoritative and every endpoint requires the generated Bearer token.",
     license: { name: "MIT", identifier: "MIT" },
   },
@@ -21,7 +21,7 @@ export const openApiDocument = {
   security: [{ bearerAuth: [] }],
   tags: [
     { name: "Pages" }, { name: "Search" }, { name: "History" }, { name: "Trash" },
-    { name: "Attachments" }, { name: "Transfer" }, { name: "Taxonomy" }, { name: "Semantic" }, { name: "Contract" },
+    { name: "Attachments" }, { name: "Documents" }, { name: "Transfer" }, { name: "Taxonomy" }, { name: "Semantic" }, { name: "Contract" },
   ],
   paths: {
     "/openapi.json": {
@@ -58,6 +58,39 @@ export const openApiDocument = {
     },
     "/semantic/status": {
       get: { tags: ["Semantic"], operationId: "getSemanticStatus", summary: "Get semantic extension and indexing queue status", responses: { "200": response("Semantic status", ref("SemanticStatus")), ...errorResponses } },
+    },
+    "/documents": {
+      get: { tags: ["Documents"], operationId: "listDocuments", summary: "List imported documents", responses: { "200": response("Document list", { type: "object", required: ["documents"], properties: { documents: { type: "array", items: ref("Document") } } }), ...errorResponses } },
+      post: { tags: ["Documents"], operationId: "importDocument", summary: "Upload and queue a document for extraction", parameters: [{ name: "filename", in: "query", required: true, schema: { type: "string" } }], requestBody: { required: true, content: { "*/*": { schema: { type: "string", format: "binary" } } } }, responses: { "202": response("Queued document", ref("Document")), ...errorResponses } },
+    },
+    "/documents/{documentId}": {
+      parameters: [{ $ref: "#/components/parameters/DocumentId" }],
+      get: { tags: ["Documents"], operationId: "getDocument", summary: "Get document metadata and current version", responses: { "200": response("Document", ref("Document")), ...errorResponses } },
+    },
+    "/documents/{documentId}/versions": {
+      parameters: [{ $ref: "#/components/parameters/DocumentId" }],
+      get: { tags: ["Documents"], operationId: "listDocumentVersions", summary: "List retained document versions", responses: { "200": response("Document versions", { type: "object", required: ["versions"], properties: { versions: { type: "array", items: ref("DocumentVersion") } } }), ...errorResponses } },
+      post: { tags: ["Documents"], operationId: "replaceDocument", summary: "Upload an explicit new document version", parameters: [{ name: "filename", in: "query", required: true, schema: { type: "string" } }], requestBody: { required: true, content: { "*/*": { schema: { type: "string", format: "binary" } } } }, responses: { "202": response("Queued replacement", ref("Document")), ...errorResponses } },
+    },
+    "/documents/{documentId}/content": {
+      parameters: [{ $ref: "#/components/parameters/DocumentId" }],
+      get: { tags: ["Documents"], operationId: "getDocumentContent", summary: "Get structured extracted sections", parameters: [{ name: "version", in: "query", schema: { type: "integer", minimum: 1 } }, { name: "offset", in: "query", schema: { type: "integer", minimum: 0, default: 0 } }, { $ref: "#/components/parameters/Limit" }], responses: { "200": response("Extracted sections", { type: "object", required: ["sections", "nextOffset"], properties: { sections: { type: "array", items: ref("DocumentSection") }, nextOffset: { type: ["integer", "null"] } } }), ...errorResponses } },
+    },
+    "/documents/{documentId}/download": {
+      parameters: [{ $ref: "#/components/parameters/DocumentId" }],
+      get: { tags: ["Documents"], operationId: "downloadDocument", summary: "Download the current original document", responses: { "200": { description: "Original document bytes", content: { "*/*": { schema: { type: "string", format: "binary" } } } }, ...errorResponses } },
+    },
+    "/documents/{documentId}/review": {
+      parameters: [{ $ref: "#/components/parameters/DocumentId" }],
+      post: { tags: ["Documents"], operationId: "acknowledgeDocumentReview", summary: "Accept preserved human page fields as reviewed", responses: { "200": response("Reviewed document", ref("Document")), ...errorResponses } },
+    },
+    "/documents/{documentId}/cancel": {
+      parameters: [{ $ref: "#/components/parameters/DocumentId" }],
+      post: { tags: ["Documents"], operationId: "cancelDocumentExtraction", summary: "Cancel queued or running extraction", responses: { "200": response("Cancelled document", ref("Document")), ...errorResponses } },
+    },
+    "/documents/{documentId}/retry": {
+      parameters: [{ $ref: "#/components/parameters/DocumentId" }],
+      post: { tags: ["Documents"], operationId: "retryDocumentExtraction", summary: "Retry failed or cancelled extraction", responses: { "200": response("Queued document", ref("Document")), ...errorResponses } },
     },
     "/search": {
       get: {
@@ -160,6 +193,7 @@ export const openApiDocument = {
       PageId: { name: "pageId", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
       RevisionId: { name: "revisionId", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
       AttachmentId: { name: "attachmentId", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
+      DocumentId: { name: "documentId", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
       Cursor: { name: "cursor", in: "query", schema: { type: "string" } },
       Limit: { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 50 } },
       StatusFilter: { name: "status", in: "query", schema: { type: "string", enum: ["draft", "published", "archived", "all"], default: "published" } },
@@ -195,6 +229,9 @@ export const openApiDocument = {
       SearchResults: { type: "object", required: ["pages", "nextCursor"], properties: { pages: { type: "array", items: ref("SearchResult") }, nextCursor: { type: ["string", "null"] }, mode: { type: "string", enum: ["hybrid", "lexical"] }, warning: { type: "string" } } },
       TagDefinition: { type: "object", required: ["tag", "kind", "displayName", "description", "createdBy", "aliases", "usageCount", "createdAt"], properties: { tag: { type: "string" }, kind: { type: "string", enum: ["topic", "entity", "source", "type", "custom"] }, displayName: { type: "string" }, description: { type: ["string", "null"] }, createdBy: { type: "string", enum: ["human", "model", "migration"] }, aliases: { type: "array", items: { type: "string" } }, usageCount: { type: "integer" }, createdAt: { type: "string", format: "date-time" } } },
       SemanticStatus: { type: "object", required: ["enabled", "vectorAvailable", "model", "dimensions", "pendingPages", "indexedPages", "lastError"], properties: { enabled: { type: "boolean" }, vectorAvailable: { type: "boolean" }, model: { type: "string" }, dimensions: { type: "integer" }, pendingPages: { type: "integer" }, indexedPages: { type: "integer" }, lastError: { type: ["string", "null"] } } },
+      DocumentVersion: { type: "object", required: ["id", "documentId", "version", "sha256", "size", "status", "parserVersion", "metadata", "warnings", "createdAt", "extractedAt"], properties: { id: { type: "integer" }, documentId: { type: "integer" }, version: { type: "integer" }, sha256: { type: "string", pattern: "^[a-f0-9]{64}$" }, size: { type: "integer" }, status: { type: "string", enum: ["queued", "extracting", "ready", "failed", "cancelled", "superseded"] }, parserVersion: { type: ["string", "null"] }, metadata: { type: "object", additionalProperties: ref("Scalar") }, warnings: { type: "array", items: { type: "string" } }, createdAt: { type: "string", format: "date-time" }, extractedAt: { type: ["string", "null"], format: "date-time" } } },
+      Document: { type: "object", required: ["id", "pageId", "filename", "mimeType", "format", "status", "needsOcr", "needsReview", "lastError", "createdAt", "updatedAt", "currentVersion"], properties: { id: { type: "integer" }, pageId: { type: "integer" }, filename: { type: "string" }, mimeType: { type: "string" }, format: { type: "string", enum: ["docx", "xlsx", "pptx", "pdf", "markdown", "text"] }, status: { type: "string", enum: ["queued", "extracting", "ready", "failed", "cancelled"] }, needsOcr: { type: "boolean" }, needsReview: { type: "boolean" }, lastError: { type: ["string", "null"] }, createdAt: { type: "string", format: "date-time" }, updatedAt: { type: "string", format: "date-time" }, currentVersion: ref("DocumentVersion") } },
+      DocumentSection: { type: "object", required: ["id", "documentVersionId", "ordinal", "kind", "title", "locator", "text", "hidden", "needsOcr"], properties: { id: { type: "integer" }, documentVersionId: { type: "integer" }, ordinal: { type: "integer" }, kind: { type: "string", enum: ["heading", "paragraph", "table", "slide", "notes", "sheet", "page", "text"] }, title: { type: ["string", "null"] }, locator: { type: "object", required: ["label"], properties: { label: { type: "string" }, page: { type: "integer" }, slide: { type: "integer" }, sheet: { type: "string" }, range: { type: "string" }, heading: { type: "string" }, part: { type: "string" } } }, text: { type: "string" }, hidden: { type: "boolean" }, needsOcr: { type: "boolean" } } },
       TreeEntry: { allOf: [ref("PageReference"), { type: "object", required: ["status", "parentId", "depth"], properties: { status: ref("PageStatus"), parentId: { type: ["integer", "null"] }, depth: { type: "integer", minimum: 0 } } }] },
       RevisionSummary: { type: "object", required: ["id", "pageId", "title", "alias", "tags", "status", "parentId", "properties", "source", "createdAt"], properties: {
         id: { type: "integer" }, pageId: { type: "integer" }, title: { type: "string" }, alias: { type: "string" }, tags: { type: "array", items: { type: "string" } }, status: ref("PageStatus"), parentId: { type: ["integer", "null"] }, properties: ref("Properties"), source: { type: "string", enum: ["web", "api", "cli", "mcp"] }, createdAt: { type: "string", format: "date-time" },

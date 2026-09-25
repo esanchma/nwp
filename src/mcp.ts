@@ -23,7 +23,7 @@ export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSear
 
 function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig): McpServer {
   const embedder = semanticConfig?.enabled ? new OllamaEmbedder(semanticConfig) : null;
-  const server = new McpServer({ name: "nwp", version: "0.9.0" });
+  const server = new McpServer({ name: "nwp", version: "0.10.0" });
   const statusSchema = z.enum(["draft", "published", "archived"]);
   const statusFilterSchema = z.enum(["draft", "published", "archived", "all"]);
   const propertiesSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]));
@@ -118,6 +118,52 @@ function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig): 
     "semantic_index_status",
     { description: "Get semantic indexing availability and queue status", inputSchema: {}, annotations: { readOnlyHint: true } },
     async () => toolResult(store.semanticStatus(semanticConfig?.enabled ?? false, semanticConfig?.embeddingModel ?? "", semanticConfig?.embeddingDimensions ?? 0)),
+  );
+
+  server.registerTool(
+    "list_documents",
+    { description: "List imported document metadata and extraction status", inputSchema: {}, annotations: { readOnlyHint: true } },
+    async () => toolResult({ documents: store.listDocuments() }),
+  );
+
+  server.registerTool(
+    "get_document",
+    { description: "Get document metadata and retained versions", inputSchema: { document_id: z.number().int().positive() }, annotations: { readOnlyHint: true } },
+    async ({ document_id }) => toolResult({ document: store.getDocument(document_id), versions: store.listDocumentVersions(document_id) }),
+  );
+
+  server.registerTool(
+    "get_document_content",
+    { description: "Get paginated structured document sections with precise source locators", inputSchema: { document_id: z.number().int().positive(), version_id: z.number().int().positive().optional(), offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(100).default(50) }, annotations: { readOnlyHint: true } },
+    async ({ document_id, version_id, offset, limit }) => {
+      const sections = store.documentSections(document_id, version_id, offset, limit);
+      const nextOffset = offset + sections.length < store.documentSectionCount(document_id, version_id) ? offset + sections.length : null;
+      return toolResult({ sections, nextOffset });
+    },
+  );
+
+  server.registerTool(
+    "cancel_document_extraction",
+    { description: "Cancel queued or running document extraction", inputSchema: { document_id: z.number().int().positive() } },
+    async ({ document_id }) => toolResult(store.cancelDocument(document_id)),
+  );
+
+  server.registerTool(
+    "retry_document_extraction",
+    { description: "Retry failed or cancelled document extraction", inputSchema: { document_id: z.number().int().positive() } },
+    async ({ document_id }) => toolResult(store.retryDocument(document_id)),
+  );
+
+  server.registerTool(
+    "acknowledge_document_review",
+    { description: "Accept the current human page fields as the reviewed managed baseline", inputSchema: { document_id: z.number().int().positive() } },
+    async ({ document_id }) => toolResult(store.acknowledgeDocumentReview(document_id)),
+  );
+
+  server.registerTool(
+    "get_document_upload_instructions",
+    { description: "Get the REST request needed to import or explicitly replace a binary document", inputSchema: { filename: z.string().min(1), document_id: z.number().int().positive().optional() }, annotations: { readOnlyHint: true } },
+    async ({ filename, document_id }) => toolResult({ method: "POST", url: document_id ? `/api/v1/documents/${document_id}/versions?filename=${encodeURIComponent(filename)}` : `/api/v1/documents?filename=${encodeURIComponent(filename)}`, authentication: "Bearer token", body: "raw file bytes" }),
   );
 
   server.registerTool(

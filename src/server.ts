@@ -12,6 +12,7 @@ import { createMcpHandler } from "./mcp.ts";
 import { openApiJson } from "./openapi.ts";
 import { createFullExport, exportPageMarkdown, importPageMarkdown } from "./transfer.ts";
 import { hybridSearch, OllamaEmbedder } from "./semantic.ts";
+import { canonicalDocumentMime, documentFormat } from "./documents.ts";
 
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024 + 64 * 1024;
 
@@ -73,8 +74,47 @@ async function apiRoute(request: Request, url: URL, store: PageStore, config: Co
   const attachmentMatch = /^\/api\/v1\/attachments\/(\d+)$/.exec(url.pathname);
   const attachmentContentMatch = /^\/api\/v1\/attachments\/(\d+)\/content$/.exec(url.pathname);
   const pageExportMatch = /^\/api\/v1\/pages\/(\d+)\/export$/.exec(url.pathname);
+  const documentMatch = /^\/api\/v1\/documents\/(\d+)$/.exec(url.pathname);
+  const documentVersionsMatch = /^\/api\/v1\/documents\/(\d+)\/versions$/.exec(url.pathname);
+  const documentContentMatch = /^\/api\/v1\/documents\/(\d+)\/content$/.exec(url.pathname);
+  const documentDownloadMatch = /^\/api\/v1\/documents\/(\d+)\/download$/.exec(url.pathname);
+  const documentReviewMatch = /^\/api\/v1\/documents\/(\d+)\/review$/.exec(url.pathname);
+  const documentCancelMatch = /^\/api\/v1\/documents\/(\d+)\/cancel$/.exec(url.pathname);
+  const documentRetryMatch = /^\/api\/v1\/documents\/(\d+)\/retry$/.exec(url.pathname);
 
   if (request.method === "GET" && url.pathname === "/api/v1/openapi.json") return openApiResponse();
+  if (request.method === "GET" && url.pathname === "/api/v1/documents") return json({ documents: store.listDocuments() });
+  if (request.method === "POST" && url.pathname === "/api/v1/documents") {
+    if (!config.documentRag.enabled) throw new AppError("document_rag_disabled", "document ingestion is disabled", 503);
+    const filename = url.searchParams.get("filename") ?? "";
+    const inputMime = request.headers.get("content-type") ?? "application/octet-stream";
+    const format = documentFormat(filename, inputMime);
+    const bytes = await readDocumentBytes(request, config.documentRag.maxFileBytes);
+    return json(store.createDocument(filename, canonicalDocumentMime(format), format, bytes, apiSource(request), config.documentRag.maxFileBytes), 202);
+  }
+  if (request.method === "GET" && documentContentMatch) {
+    const documentId = Number(documentContentMatch[1]);
+    const version = optionalPositiveInteger(url.searchParams.get("version"));
+    const offset = nonNegativeInteger(url.searchParams.get("offset"));
+    const limit = numberParam(url.searchParams.get("limit"), 50);
+    const sections = store.documentSections(documentId, version, offset, limit);
+    const nextOffset = offset + sections.length < store.documentSectionCount(documentId, version) ? offset + sections.length : null;
+    return json({ sections, nextOffset });
+  }
+  if (request.method === "GET" && documentDownloadMatch) return documentDownloadResponse(store, Number(documentDownloadMatch[1]));
+  if (request.method === "POST" && documentReviewMatch) return json(store.acknowledgeDocumentReview(Number(documentReviewMatch[1])));
+  if (request.method === "POST" && documentCancelMatch) return json(store.cancelDocument(Number(documentCancelMatch[1])));
+  if (request.method === "POST" && documentRetryMatch) return json(store.retryDocument(Number(documentRetryMatch[1])));
+  if (request.method === "GET" && documentVersionsMatch) return json({ versions: store.listDocumentVersions(Number(documentVersionsMatch[1])) });
+  if (request.method === "POST" && documentVersionsMatch) {
+    if (!config.documentRag.enabled) throw new AppError("document_rag_disabled", "document ingestion is disabled", 503);
+    const filename = url.searchParams.get("filename") ?? "";
+    const inputMime = request.headers.get("content-type") ?? "application/octet-stream";
+    const format = documentFormat(filename, inputMime);
+    const bytes = await readDocumentBytes(request, config.documentRag.maxFileBytes);
+    return json(store.replaceDocument(Number(documentVersionsMatch[1]), filename, canonicalDocumentMime(format), format, bytes, config.documentRag.maxFileBytes), 202);
+  }
+  if (request.method === "GET" && documentMatch) return json(store.getDocument(Number(documentMatch[1])));
   if (request.method === "GET" && url.pathname === "/api/v1/export") return fullExportResponse(store);
   if (request.method === "POST" && url.pathname === "/api/v1/import/pages") {
     const markdown = new TextDecoder().decode(await readLimited(request));
@@ -211,6 +251,63 @@ async function webRoute(request: Request, url: URL, store: PageStore, config: Co
   if (request.method === "GET" && url.pathname === "/api-docs/init.js") return staticAssetResponse(swaggerUiInitializer, "text/javascript; charset=utf-8");
   if (request.method === "GET" && url.pathname === "/openapi.json") return openApiResponse();
   if (request.method === "GET" && url.pathname === "/export/all") return fullExportResponse(store);
+  if (request.method === "GET" && url.pathname === "/documents") {
+    const items = store.listDocuments().map((document) => `<li><a href="/wiki/${encodeURIComponent(store.getById(document.pageId).alias)}">${escapeHtml(document.filename)}</a><small>${escapeHtml(document.format.toUpperCase())} · version ${document.currentVersion.version} · ${escapeHtml(document.status)}${document.needsOcr ? " · OCR pending" : ""}</small></li>`).join("");
+    return html(layout("Documents", `<div class="title-row"><h1>Documents</h1><a class="button" href="/documents/import">Import document</a></div>${items ? `<ul class="page-list">${items}</ul>` : "<p>No documents yet.</p>"}`, csrf), 200, headers);
+  }
+  if (request.method === "GET" && url.pathname === "/documents/import") {
+    return html(layout("Import document", `<h1>Import document</h1><p>Supported formats: DOCX, XLSX, PPTX, PDF, Markdown, and TXT.</p><form method="post" enctype="multipart/form-data" action="/documents/import"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Document<input type="file" name="file" accept=".docx,.xlsx,.pptx,.pdf,.md,.markdown,.txt" required></label><button type="submit">Queue import</button></form>`, csrf), 200, headers);
+  }
+  if (request.method === "POST" && url.pathname === "/documents/import") {
+    await verifyCsrf(request);
+    if (!config.documentRag.enabled) throw new AppError("document_rag_disabled", "document ingestion is disabled", 503);
+    requireBoundedMultipart(request, config.documentRag.maxFileBytes);
+    const form = await request.formData();
+    const file = form.get("file");
+    if (!(file instanceof File)) throw new AppError("document_required", "choose a document", 400);
+    if (file.size > config.documentRag.maxFileBytes) throw new AppError("document_too_large", `document exceeds the technical ${config.documentRag.maxFileBytes} byte guard`, 413);
+    const format = documentFormat(file.name, file.type);
+    const document = store.createDocument(file.name, canonicalDocumentMime(format), format, new Uint8Array(await file.arrayBuffer()), "web", config.documentRag.maxFileBytes);
+    return redirect(`/wiki/${encodeURIComponent(store.getById(document.pageId).alias)}`);
+  }
+  const documentJobWebMatch = /^\/documents\/(\d+)\/(cancel|retry)$/.exec(url.pathname);
+  if (request.method === "POST" && documentJobWebMatch) {
+    await verifyCsrf(request);
+    const document = documentJobWebMatch[2] === "cancel" ? store.cancelDocument(Number(documentJobWebMatch[1])) : store.retryDocument(Number(documentJobWebMatch[1]));
+    return redirect(`/wiki/${encodeURIComponent(store.getById(document.pageId).alias)}`);
+  }
+  const documentReviewWebMatch = /^\/documents\/(\d+)\/review$/.exec(url.pathname);
+  if (request.method === "POST" && documentReviewWebMatch) {
+    await verifyCsrf(request);
+    const document = store.acknowledgeDocumentReview(Number(documentReviewWebMatch[1]));
+    return redirect(`/wiki/${encodeURIComponent(store.getById(document.pageId).alias)}`);
+  }
+  const documentDownloadWebMatch = /^\/documents\/(\d+)\/download$/.exec(url.pathname);
+  if (request.method === "GET" && documentDownloadWebMatch) return documentDownloadResponse(store, Number(documentDownloadWebMatch[1]));
+  const documentContentWebMatch = /^\/documents\/(\d+)\/content$/.exec(url.pathname);
+  if (request.method === "GET" && documentContentWebMatch) {
+    const documentId = Number(documentContentWebMatch[1]);
+    const document = store.getDocument(documentId);
+    const offset = nonNegativeInteger(url.searchParams.get("offset"));
+    const sections = store.documentSections(documentId, undefined, offset, 50);
+    const total = store.documentSectionCount(documentId);
+    const content = sections.map((item) => `<section class="document-section"><h2>${escapeHtml(item.locator.label)}${item.hidden ? " <small>(hidden)</small>" : ""}${item.needsOcr ? " <small>(OCR pending)</small>" : ""}</h2><pre>${escapeHtml(item.text)}</pre></section>`).join("");
+    const previous = offset > 0 ? `<a class="button secondary" href="/documents/${documentId}/content?offset=${Math.max(0, offset - 50)}">Previous</a>` : "";
+    const next = offset + sections.length < total ? `<a class="button secondary" href="/documents/${documentId}/content?offset=${offset + sections.length}">Next</a>` : "";
+    return html(layout(`Content · ${document.filename}`, `<p><a href="/wiki/${encodeURIComponent(store.getById(document.pageId).alias)}">← ${escapeHtml(document.filename)}</a></p><h1>Extracted content</h1><p>${total} sections · showing ${total ? offset + 1 : 0}–${offset + sections.length}</p>${content || "<p>No extracted text.</p>"}<div class="page-actions">${previous}${next}</div>`, csrf), 200, headers);
+  }
+  const documentReplaceMatch = /^\/documents\/(\d+)\/replace$/.exec(url.pathname);
+  if (request.method === "POST" && documentReplaceMatch) {
+    await verifyCsrf(request);
+    requireBoundedMultipart(request, config.documentRag.maxFileBytes);
+    const form = await request.formData();
+    const file = form.get("file");
+    if (!(file instanceof File)) throw new AppError("document_required", "choose a document", 400);
+    if (file.size > config.documentRag.maxFileBytes) throw new AppError("document_too_large", `document exceeds the technical ${config.documentRag.maxFileBytes} byte guard`, 413);
+    const format = documentFormat(file.name, file.type);
+    const document = store.replaceDocument(Number(documentReplaceMatch[1]), file.name, canonicalDocumentMime(format), format, new Uint8Array(await file.arrayBuffer()), config.documentRag.maxFileBytes);
+    return redirect(`/wiki/${encodeURIComponent(store.getById(document.pageId).alias)}`);
+  }
   if (request.method === "GET" && url.pathname === "/import") {
     return html(layout("Import page", `<h1>Import Markdown</h1><p>The file must begin with nwp YAML front matter. Alias collisions create a suffixed alias.</p><form method="post" enctype="multipart/form-data" action="/import"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Markdown file<input type="file" name="file" accept=".md,text/markdown,text/plain" required></label><button type="submit">Import page</button></form>`, csrf), 200, headers);
   }
@@ -374,6 +471,8 @@ function pageView(page: Page, store: PageStore, csrf: string): string {
   const breadcrumbs = page.breadcrumbs.map((crumb) => `<a href="/wiki/${encodeURIComponent(crumb.alias)}">${escapeHtml(crumb.title)}</a>`).join(" <span aria-hidden=\"true\">›</span> ");
   const properties = Object.entries(page.properties).map(([key, value]) => `<tr><th>${escapeHtml(key)}</th><td><code>${escapeHtml(JSON.stringify(value))}</code></td></tr>`).join("");
   const backlinks = page.backlinks.map((link) => `<li><a href="/wiki/${encodeURIComponent(link.alias)}">${escapeHtml(link.title)}</a></li>`).join("");
+  const document = store.documentForPage(page.id);
+  const documentContent = document ? documentView(document, store, csrf) : "";
   const attachments = store.listAttachments(page.id);
   const attachmentItems = attachments.map((attachment) => {
     const url = attachmentUrl(attachment);
@@ -384,10 +483,17 @@ function pageView(page: Page, store: PageStore, csrf: string): string {
     ${breadcrumbs ? `<nav class="breadcrumbs" aria-label="Breadcrumb">${breadcrumbs}</nav>` : ""}
     <header class="page-header"><div><h1>${escapeHtml(page.title)} <span class="status status-${page.status}">${page.status}</span></h1>${tags ? `<div class="tags">${tags}</div>` : ""}</div><div class="page-actions"><a class="button secondary" href="/wiki/${encodeURIComponent(page.alias)}/history">History</a><a class="button secondary" href="/wiki/${encodeURIComponent(page.alias)}/export">Export</a><a class="button secondary" href="/wiki/${encodeURIComponent(page.alias)}/edit">Edit</a><a class="button danger" href="/wiki/${encodeURIComponent(page.alias)}/delete">Delete</a></div></header>
     <div class="markdown">${content || "<p><em>This page is empty.</em></p>"}</div>
+    ${documentContent}
     ${properties ? `<details class="properties"><summary>Properties</summary><table>${properties}</table></details>` : ""}
   </article>
   <aside class="attachments"><h2>Attachments</h2>${attachmentItems ? `<ul>${attachmentItems}</ul>` : "<p>No attachments.</p>"}<form class="attachment-upload" method="post" enctype="multipart/form-data" action="/wiki/${encodeURIComponent(page.alias)}/attachments"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Add file<input type="file" name="file" required></label><button type="submit">Upload</button></form></aside>
   <aside><h2>Backlinks</h2>${backlinks ? `<ul>${backlinks}</ul>` : "<p>No pages link here.</p>"}</aside>`;
+}
+
+function documentView(document: ReturnType<PageStore["getDocument"]>, store: PageStore, csrf: string): string {
+  const warnings = document.currentVersion.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("");
+  const sectionCount = document.status === "ready" ? store.documentSectionCount(document.id) : 0;
+  return `<aside class="document-content"><div class="page-header"><div><h2>Document content</h2><p>${escapeHtml(document.filename)} · ${escapeHtml(document.format.toUpperCase())} · version ${document.currentVersion.version} · <strong>${escapeHtml(document.status)}</strong>${document.needsOcr ? " · OCR pending" : ""}${document.needsReview ? " · needs review" : ""}</p></div><a class="button secondary" href="/documents/${document.id}/download">Download original</a></div>${document.lastError ? `<p class="warning">${escapeHtml(document.lastError)}</p>` : ""}${document.status === "queued" || document.status === "extracting" ? `<form method="post" action="/documents/${document.id}/cancel"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button class="secondary" type="submit">Cancel extraction</button></form>` : ""}${document.status === "failed" || document.status === "cancelled" ? `<form method="post" action="/documents/${document.id}/retry"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button type="submit">Retry extraction</button></form>` : ""}${document.needsReview ? `<form method="post" action="/documents/${document.id}/review"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><p class="notice">Human page fields were preserved during replacement.</p><button type="submit">Mark reviewed</button></form>` : ""}${warnings ? `<ul>${warnings}</ul>` : ""}<form method="post" enctype="multipart/form-data" action="/documents/${document.id}/replace"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Replace with a new version<input type="file" name="file" accept=".docx,.xlsx,.pptx,.pdf,.md,.markdown,.txt" required></label><button type="submit">Queue replacement</button></form>${sectionCount ? `<p><a class="button secondary" href="/documents/${document.id}/content">View extracted text (${sectionCount} sections)</a></p>` : `<p>Extraction is ${escapeHtml(document.status)}.</p>`}</aside>`;
 }
 
 function trashPageView(page: DeletedPage, store: PageStore, csrf: string): string {
@@ -480,7 +586,7 @@ function formPage(form: FormData) {
 }
 
 function layout(title: string, body: string, csrf: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="csrf-token" content="${escapeHtml(csrf)}"><link rel="icon" href="/logo.svg" type="image/svg+xml"><title>${escapeHtml(title)} · nwp</title><style>${CSS}</style></head><body><header class="site-header"><nav><a class="brand" href="/"><img src="/logo.svg" width="34" height="34" alt="">nwp</a><form class="nav-search" action="/search" method="get"><label class="sr-only" for="nav-query">Search pages</label><input id="nav-query" type="search" name="q" placeholder="Search" aria-label="Search pages"></form><a href="/pages">Pages</a><a href="/tree">Tree</a><a href="/tags">Tags</a><a href="/taxonomy">Taxonomy</a><a href="/trash">Trash</a><a href="/api-docs">API</a><a href="/import">Import</a><a href="/export/all">Export all</a><a class="button" href="/new">New page</a></nav></header><main>${body}</main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="csrf-token" content="${escapeHtml(csrf)}"><link rel="icon" href="/logo.svg" type="image/svg+xml"><title>${escapeHtml(title)} · nwp</title><style>${CSS}</style></head><body><header class="site-header"><nav><a class="brand" href="/"><img src="/logo.svg" width="34" height="34" alt="">nwp</a><form class="nav-search" action="/search" method="get"><label class="sr-only" for="nav-query">Search pages</label><input id="nav-query" type="search" name="q" placeholder="Search" aria-label="Search pages"></form><a href="/pages">Pages</a><a href="/tree">Tree</a><a href="/tags">Tags</a><a href="/taxonomy">Taxonomy</a><a href="/documents">Documents</a><a href="/trash">Trash</a><a href="/api-docs">API</a><a href="/import">Import</a><a href="/export/all">Export all</a><a class="button" href="/new">New page</a></nav></header><main>${body}</main></body></html>`;
 }
 
 const CSS = `
@@ -682,6 +788,42 @@ async function attachmentResponse(store: PageStore, attachmentId: number, forceD
   });
 }
 
+async function documentDownloadResponse(store: PageStore, documentId: number): Promise<Response> {
+  const { document, path } = store.documentBlobPath(documentId);
+  const file = Bun.file(path);
+  if (!await file.exists()) throw new AppError("document_content_missing", "document content is missing", 500);
+  return new Response(file, { headers: { "Content-Type": document.mimeType, "Content-Length": String(document.currentVersion.size), "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(document.filename)}`, "Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox" } });
+}
+
+function requireBoundedMultipart(request: Request, maxBytes: number): void {
+  const length = Number(request.headers.get("content-length") ?? 0);
+  if (!length) throw new AppError("length_required", "document uploads require Content-Length", 411);
+  if (length > maxBytes + 1024 * 1024) throw new AppError("document_too_large", `document exceeds the technical ${maxBytes} byte guard`, 413);
+}
+
+async function readDocumentBytes(request: Request, maxBytes: number): Promise<Uint8Array> {
+  const length = Number(request.headers.get("content-length") ?? 0);
+  if (length > maxBytes) throw new AppError("document_too_large", `document exceeds the technical ${maxBytes} byte guard`, 413);
+  if (!request.body) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  const reader = request.body.getReader();
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new AppError("document_too_large", `document exceeds the technical ${maxBytes} byte guard`, 413);
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return bytes;
+}
+
 async function readAttachmentBytes(request: Request, maxBytes: number | null): Promise<Uint8Array> {
   const length = Number(request.headers.get("content-length") ?? 0);
   if (maxBytes !== null && length > maxBytes) throw new AppError("attachment_too_large", "attachment exceeds the configured limit", 413);
@@ -713,6 +855,20 @@ async function readLimited(request: Request): Promise<Uint8Array> {
   const bytes = new Uint8Array(await request.arrayBuffer());
   if (bytes.byteLength > MAX_REQUEST_BYTES) throw new AppError("body_too_large", "request body is too large", 413);
   return bytes;
+}
+
+function nonNegativeInteger(value: string | null): number {
+  if (value === null) return 0;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new AppError("invalid_offset", "offset must be a non-negative integer", 400);
+  return parsed;
+}
+
+function optionalPositiveInteger(value: string | null): number | undefined {
+  if (value === null) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new AppError("invalid_id", "value must be a positive integer", 400);
+  return parsed;
 }
 
 function numberParam(value: string | null, fallback: number): number {

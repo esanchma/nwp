@@ -147,6 +147,62 @@ export interface TagDefinition {
   createdAt: string;
 }
 
+export type DocumentFormat = "docx" | "xlsx" | "pptx" | "pdf" | "markdown" | "text";
+export type DocumentStatus = "queued" | "extracting" | "ready" | "failed" | "cancelled";
+export type DocumentVersionStatus = DocumentStatus | "superseded";
+export type DocumentSectionKind = "heading" | "paragraph" | "table" | "slide" | "notes" | "sheet" | "page" | "text";
+
+export interface DocumentLocator {
+  label: string;
+  page?: number;
+  slide?: number;
+  sheet?: string;
+  range?: string;
+  heading?: string;
+  part?: string;
+}
+
+export interface DocumentSection {
+  id: number;
+  documentVersionId: number;
+  ordinal: number;
+  kind: DocumentSectionKind;
+  title: string | null;
+  locator: DocumentLocator;
+  text: string;
+  hidden: boolean;
+  needsOcr: boolean;
+}
+
+export interface DocumentVersion {
+  id: number;
+  documentId: number;
+  version: number;
+  sha256: string;
+  size: number;
+  status: DocumentVersionStatus;
+  parserVersion: string | null;
+  metadata: Record<string, string | number | boolean | null>;
+  warnings: string[];
+  createdAt: string;
+  extractedAt: string | null;
+}
+
+export interface DocumentRecord {
+  id: number;
+  pageId: number;
+  filename: string;
+  mimeType: string;
+  format: DocumentFormat;
+  status: DocumentStatus;
+  needsOcr: boolean;
+  needsReview: boolean;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+  currentVersion: DocumentVersion;
+}
+
 export interface SemanticStatus {
   enabled: boolean;
   vectorAvailable: boolean;

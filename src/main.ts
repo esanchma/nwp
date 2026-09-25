@@ -5,6 +5,7 @@ import { ensureRuntimeFiles, loadConfig, readApiToken, type ConfigOverrides } fr
 import { PageStore } from "./database.ts";
 import { createRequestHandler } from "./server.ts";
 import { loadEmbeddedSqliteVec, SemanticIndexer, semanticIndexConfig } from "./semantic.ts";
+import { canonicalDocumentMime, documentFormat, DocumentWorker } from "./documents.ts";
 
 const args = process.argv.slice(2);
 
@@ -24,12 +25,13 @@ async function main(argv: string[]): Promise<void> {
   if (command === "attachment") return attachmentCommand(argv.slice(1));
   if (command === "tree") return treeCommand(argv.slice(1));
   if (command === "tag") return tagCommand(argv.slice(1));
+  if (command === "document") return documentCommand(argv.slice(1));
   if (command === "import") return importCommand(argv.slice(1));
   if (command === "export") return exportCommand(argv.slice(1));
   if (command === "worker") return workerCommand(argv.slice(1));
   if (command === "index") return indexCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") return printHelp();
-  if (command === "--version" || command === "-v") return console.log("nwp 0.9.0");
+  if (command === "--version" || command === "-v") return console.log("nwp 0.10.0");
   throw new Error(`unknown command '${command}'. Run 'nwp help'.`);
 }
 
@@ -45,18 +47,16 @@ async function serve(argv: string[]): Promise<void> {
   const token = await ensureRuntimeFiles(config);
   const releaseLock = await acquireLock(join(config.dataDir, "nwp.lock"));
   const store = new PageStore(config.dbPath);
-  let indexAbort: AbortController | null = null;
-  let indexLoop: Promise<void> | null = null;
+  const workerAbort = hasFlag(options, "with-worker") ? new AbortController() : null;
+  const workerLoops: Promise<void>[] = [];
   if (config.semanticSearch.enabled) {
     const extension = loadEmbeddedSqliteVec(store, config.dataDir);
     store.configureSemantic(semanticIndexConfig(config.semanticSearch));
     if (!extension.available) console.error(`semantic search unavailable: ${extension.error}`);
-    if (hasFlag(options, "with-worker")) {
-      indexAbort = new AbortController();
-      indexLoop = new SemanticIndexer(store, config.semanticSearch).runLoop(indexAbort.signal);
-      console.error("semantic index worker running in server process");
-    }
+    else if (workerAbort) workerLoops.push(new SemanticIndexer(store, config.semanticSearch).runLoop(workerAbort.signal));
   }
+  if (workerAbort && config.documentRag.enabled) workerLoops.push(new DocumentWorker(store, config.documentRag).runLoop(workerAbort.signal));
+  if (workerLoops.length) console.error("background workers running in server process");
 
   try {
     const fetch = await createRequestHandler(store, config, token);
@@ -73,11 +73,46 @@ async function serve(argv: string[]): Promise<void> {
       process.once("SIGTERM", stop);
     });
   } finally {
-    indexAbort?.abort();
-    await indexLoop?.catch(() => undefined);
+    workerAbort?.abort();
+    await Promise.all(workerLoops.map((loop) => loop.catch(() => undefined)));
     store.close();
     await releaseLock();
   }
+}
+
+async function documentCommand(argv: string[]): Promise<void> {
+  const action = argv[0] ?? "list";
+  const options = parseOptions(argv.slice(1));
+  const config = await loadConfig({ configPath: optionalString(options, "config"), dataDir: optionalString(options, "data-dir") });
+  if (action === "run") {
+    await ensureRuntimeFiles(config);
+    const store = new PageStore(config.dbPath);
+    try { return printResult({ processed: await new DocumentWorker(store, config.documentRag).runUntilIdle() }, hasFlag(options, "json")); }
+    finally { store.close(); }
+  }
+  const token = optionalString(options, "token") ?? await readApiToken(config);
+  const endpoint = optionalString(options, "endpoint") ?? `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${config.port}`;
+  if (action === "list") return printResult(await apiRequest(endpoint, token, "/api/v1/documents", "GET"), true);
+  if (action === "get" || action === "review" || action === "cancel" || action === "retry") {
+    const id = integerArgument(options, 0, `document ${action} requires a document ID`);
+    const suffix = action === "get" ? "" : `/${action}`;
+    return printResult(await apiRequest(endpoint, token, `/api/v1/documents/${id}${suffix}`, action === "get" ? "GET" : "POST"), true);
+  }
+  if (action === "import" || action === "replace") {
+    const id = action === "replace" ? integerArgument(options, 0, "document replace requires a document ID") : null;
+    const path = positional(options, action === "replace" ? 1 : 0);
+    if (!path) throw new Error(`document ${action} requires a file path`);
+    const file = Bun.file(path);
+    if (!await file.exists()) throw new Error(`file not found: ${path}`);
+    const filename = optionalString(options, "filename") ?? path.split(/[\\/]/).at(-1)!;
+    const format = documentFormat(filename, file.type);
+    const target = id === null ? "/api/v1/documents" : `/api/v1/documents/${id}/versions`;
+    const response = await fetch(new URL(`${target}?filename=${encodeURIComponent(filename)}`, endpoint), { method: "POST", headers: { Authorization: `Bearer ${token}`, "X-NWP-Source": "cli", "Content-Type": canonicalDocumentMime(format) }, body: file });
+    const result = await response.json() as { error?: { message?: string } };
+    if (!response.ok) throw new Error(result.error?.message ?? `API returned ${response.status}`);
+    return printResult(result, true);
+  }
+  throw new Error("document command must be import, replace, list, get, review, cancel, retry, or run");
 }
 
 async function tagCommand(argv: string[]): Promise<void> {
@@ -98,18 +133,23 @@ async function tagCommand(argv: string[]): Promise<void> {
 async function workerCommand(argv: string[]): Promise<void> {
   const options = parseOptions(argv);
   const config = await loadConfig({ configPath: optionalString(options, "config"), dataDir: optionalString(options, "data-dir") });
-  if (!config.semanticSearch.enabled) throw new Error("semantic search is disabled");
+  if (!config.semanticSearch.enabled && !config.documentRag.enabled) throw new Error("all workers are disabled");
   await ensureRuntimeFiles(config);
   const store = new PageStore(config.dbPath);
-  const extension = loadEmbeddedSqliteVec(store, config.dataDir);
-  if (!extension.available) throw new Error(`cannot load sqlite-vec: ${extension.error}`);
-  const indexer = new SemanticIndexer(store, config.semanticSearch);
   const abort = new AbortController();
+  const loops: Promise<void>[] = [];
+  if (config.semanticSearch.enabled) {
+    const extension = loadEmbeddedSqliteVec(store, config.dataDir);
+    if (!extension.available) console.error(`semantic indexing unavailable: ${extension.error}`);
+    else loops.push(new SemanticIndexer(store, config.semanticSearch).runLoop(abort.signal));
+  }
+  if (config.documentRag.enabled) loops.push(new DocumentWorker(store, config.documentRag).runLoop(abort.signal));
   const stop = () => abort.abort();
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
-  console.error(`nwp semantic worker started (${indexer.owner})`);
-  try { await indexer.runLoop(abort.signal); }
+  if (!loops.length) throw new Error("no worker could be started");
+  console.error("nwp workers started");
+  try { await Promise.all(loops); }
   finally { store.close(); }
 }
 
@@ -497,6 +537,12 @@ Usage:
   nwp tree [--status STATUS|all] [--json]
   nwp tag list
   nwp tag define --tag TAG --kind KIND [--name NAME] [--aliases LIST]
+  nwp document import PATH
+  nwp document replace ID PATH
+  nwp document list
+  nwp document get ID
+  nwp document review|cancel|retry ID
+  nwp document run [--json]
   nwp trash list [--limit N] [--cursor CURSOR] [--json]
   nwp trash get|restore|purge ID [--json]
   nwp attachment add PAGE_ID PATH [--name FILENAME] [--json]
@@ -511,7 +557,7 @@ Usage:
   nwp worker
 
 Serve option:
-  --with-worker       Run semantic indexing in the server process
+  --with-worker       Run document extraction and semantic indexing in the server process
 
 Client options:
   --endpoint URL   Override the configured server URL

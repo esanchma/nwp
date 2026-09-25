@@ -12,6 +12,16 @@ export interface SemanticSearchConfig {
   chunkOverlap: number;
 }
 
+export interface DocumentRagConfig {
+  enabled: boolean;
+  maxFileBytes: number;
+  maxExpandedBytes: number;
+  maxArchiveEntries: number;
+  maxCompressionRatio: number;
+  maxPdfPages: number;
+  maxSpreadsheetCells: number;
+}
+
 export interface Config {
   host: string;
   port: number;
@@ -21,6 +31,7 @@ export interface Config {
   configPath: string;
   attachmentMaxBytes: number | null;
   semanticSearch: SemanticSearchConfig;
+  documentRag: DocumentRagConfig;
 }
 
 export interface ConfigOverrides {
@@ -71,10 +82,25 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     chunkCharacters: numberValue(semantic.chunk_characters, "semantic_search.chunk_characters", 1600),
     chunkOverlap: numberValue(semantic.chunk_overlap, "semantic_search.chunk_overlap", 200),
   };
+  const documents = objectValue(file.document_rag, "document_rag");
+  const documentRag: DocumentRagConfig = {
+    enabled: booleanValue(documents.enabled, "document_rag.enabled", true),
+    maxFileBytes: numberValue(documents.max_file_bytes, "document_rag.max_file_bytes", 512 * 1024 * 1024),
+    maxExpandedBytes: numberValue(documents.max_expanded_bytes, "document_rag.max_expanded_bytes", 2 * 1024 * 1024 * 1024),
+    maxArchiveEntries: numberValue(documents.max_archive_entries, "document_rag.max_archive_entries", 100_000),
+    maxCompressionRatio: numberValue(documents.max_compression_ratio, "document_rag.max_compression_ratio", 1000),
+    maxPdfPages: numberValue(documents.max_pdf_pages, "document_rag.max_pdf_pages", 10_000),
+    maxSpreadsheetCells: numberValue(documents.max_spreadsheet_cells, "document_rag.max_spreadsheet_cells", 5_000_000),
+  };
 
   if (!Number.isInteger(semanticSearch.embeddingDimensions) || semanticSearch.embeddingDimensions < 1) throw new Error("semantic_search.embedding_dimensions must be a positive integer");
   if (!Number.isInteger(semanticSearch.chunkCharacters) || semanticSearch.chunkCharacters < 200) throw new Error("semantic_search.chunk_characters must be an integer of at least 200");
   if (!Number.isInteger(semanticSearch.chunkOverlap) || semanticSearch.chunkOverlap < 0 || semanticSearch.chunkOverlap >= semanticSearch.chunkCharacters) throw new Error("semantic_search.chunk_overlap must be smaller than chunk_characters");
+
+  for (const [name, value] of Object.entries({ max_file_bytes: documentRag.maxFileBytes, max_expanded_bytes: documentRag.maxExpandedBytes, max_archive_entries: documentRag.maxArchiveEntries, max_compression_ratio: documentRag.maxCompressionRatio, max_pdf_pages: documentRag.maxPdfPages, max_spreadsheet_cells: documentRag.maxSpreadsheetCells })) {
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error(`document_rag.${name} must be a positive integer`);
+  }
+  if (documentRag.maxExpandedBytes < documentRag.maxFileBytes) throw new Error("document_rag.max_expanded_bytes must not be smaller than max_file_bytes");
 
   if (attachmentMaxBytes !== null && (!Number.isSafeInteger(attachmentMaxBytes) || attachmentMaxBytes < 1)) {
     throw new Error("max_attachment_bytes must be zero (unlimited) or a positive integer");
@@ -92,6 +118,7 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     configPath,
     attachmentMaxBytes,
     semanticSearch,
+    documentRag,
   };
 }
 

@@ -18,6 +18,12 @@ import {
   type Attachment,
   type ChangeSource,
   type DeletedPage,
+  type DocumentFormat,
+  type DocumentRecord,
+  type DocumentSection,
+  type DocumentStatus,
+  type DocumentVersion,
+  type DocumentVersionStatus,
   type Page,
   type PageInput,
   type PageList,
@@ -36,6 +42,7 @@ import {
   type TrashList,
   type TreeEntry,
 } from "./domain.ts";
+import type { ExtractedDocument } from "./documents.ts";
 
 interface PageRow {
   id: number;
@@ -64,6 +71,38 @@ interface AttachmentRow {
   sha256: string;
   inline_safe: number;
   created_at: string;
+}
+
+interface DocumentRow {
+  id: number;
+  page_id: number;
+  filename: string;
+  mime_type: string;
+  format: DocumentFormat;
+  status: DocumentStatus;
+  needs_ocr: number;
+  needs_review: number;
+  last_error: string | null;
+  managed_title: string;
+  managed_body: string;
+  managed_tags_json: string;
+  managed_properties_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DocumentVersionRow {
+  id: number;
+  document_id: number;
+  version: number;
+  blob_sha256: string;
+  size: number;
+  status: DocumentVersionStatus;
+  parser_version: string | null;
+  metadata_json: string;
+  warnings_json: string;
+  created_at: string;
+  extracted_at: string | null;
 }
 
 interface RevisionRow {
@@ -283,6 +322,64 @@ const migrations = [
       ON CONFLICT(page_id) DO UPDATE SET requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = semantic_index_queue.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL;
     END;
   `,
+  `
+    CREATE TABLE documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      page_id INTEGER NOT NULL UNIQUE REFERENCES pages(id) ON DELETE CASCADE,
+      filename TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      format TEXT NOT NULL CHECK (format IN ('docx', 'xlsx', 'pptx', 'pdf', 'markdown', 'text')),
+      status TEXT NOT NULL CHECK (status IN ('queued', 'extracting', 'ready', 'failed', 'cancelled')),
+      needs_ocr INTEGER NOT NULL DEFAULT 0 CHECK (needs_ocr IN (0, 1)),
+      needs_review INTEGER NOT NULL DEFAULT 0 CHECK (needs_review IN (0, 1)),
+      last_error TEXT,
+      managed_title TEXT NOT NULL,
+      managed_body TEXT NOT NULL,
+      managed_tags_json TEXT NOT NULL,
+      managed_properties_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX documents_status_idx ON documents(status, updated_at DESC);
+    CREATE TABLE document_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL,
+      blob_sha256 TEXT NOT NULL REFERENCES attachment_blobs(sha256),
+      status TEXT NOT NULL CHECK (status IN ('queued', 'extracting', 'ready', 'failed', 'cancelled', 'superseded')),
+      parser_version TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      warnings_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      extracted_at TEXT,
+      UNIQUE(document_id, version)
+    );
+    CREATE INDEX document_versions_document_idx ON document_versions(document_id, version DESC);
+    CREATE TABLE document_sections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_version_id INTEGER NOT NULL REFERENCES document_versions(id) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('heading', 'paragraph', 'table', 'slide', 'notes', 'sheet', 'page', 'text')),
+      title TEXT,
+      locator_json TEXT NOT NULL,
+      text TEXT NOT NULL,
+      hidden INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
+      needs_ocr INTEGER NOT NULL DEFAULT 0 CHECK (needs_ocr IN (0, 1)),
+      UNIQUE(document_version_id, ordinal)
+    );
+    CREATE INDEX document_sections_version_idx ON document_sections(document_version_id, ordinal);
+    CREATE TABLE document_jobs (
+      document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+      version_id INTEGER NOT NULL UNIQUE REFERENCES document_versions(id) ON DELETE CASCADE,
+      requested_at TEXT NOT NULL,
+      available_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      revision INTEGER NOT NULL DEFAULT 1,
+      lease_owner TEXT,
+      lease_until TEXT,
+      last_error TEXT
+    );
+  `,
 ];
 
 export interface SemanticIndexConfig {
@@ -294,6 +391,7 @@ export interface SemanticIndexConfig {
 }
 
 export interface SemanticIndexTask { pageId: number; revision: number; page: Page | null }
+export interface DocumentTask { documentId: number; versionId: number; revision: number; owner: string }
 export interface SemanticNeighbor { pageId: number; chunkId: number; content: string; distance: number }
 
 export class PageStore {
@@ -654,6 +752,14 @@ export class PageStore {
     return this.db.query<AttachmentRow, []>(attachmentSelect("1 = 1")).all().map(toAttachment);
   }
 
+  allDocuments(): DocumentRecord[] {
+    return this.db.query<DocumentRow, []>("SELECT * FROM documents ORDER BY id").all().map((row) => this.hydrateDocument(row));
+  }
+
+  allDocumentVersions(): DocumentVersion[] {
+    return this.db.query<DocumentVersionRow, []>(documentVersionSelect("1 = 1") + " ORDER BY dv.document_id, dv.version").all().map(toDocumentVersion);
+  }
+
   attachmentFilePath(sha256: string): string {
     if (!/^[a-f0-9]{64}$/.test(sha256)) throw new AppError("invalid_attachment_hash", "attachment hash is invalid", 400);
     return this.pathForHash(sha256);
@@ -695,6 +801,202 @@ export class PageStore {
     };
     visit(null, 0);
     return result;
+  }
+
+  createDocument(filenameValue: string, mimeTypeValue: string, format: DocumentFormat, bytes: Uint8Array, source: ChangeSource, maxBytes: number): DocumentRecord {
+    const filename = validateFilename(filenameValue);
+    if (bytes.byteLength > maxBytes) throw new AppError("document_too_large", `document exceeds the technical ${maxBytes} byte guard`, 413);
+    const mimeType = normalizeMimeType(mimeTypeValue);
+    const title = filename.replace(/\.[^.]+$/, "").trim() || filename;
+    const page = this.create({
+      title: title.slice(0, 200),
+      body: `> Imported document: **${filename.replace(/[\\[\]*_`]/g, "\\$&")}**\n\nExtracted content is managed by nwp and appears below when ready.`,
+      tags: ["type:document", `type:${format}`],
+      properties: { "document.filename": filename, "document.format": format },
+    }, source);
+    const now = new Date().toISOString();
+    const sha256 = this.ensureBlob(bytes, mimeType, now);
+    try {
+      const documentId = this.db.transaction(() => {
+        const result = this.db.run("INSERT INTO documents(page_id, filename, mime_type, format, status, managed_title, managed_body, managed_tags_json, managed_properties_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)", [page.id, filename, mimeType, format, page.title, page.body, JSON.stringify(page.tags), JSON.stringify(page.properties), now, now]);
+        const id = Number(result.lastInsertRowid);
+        const version = this.db.run("INSERT INTO document_versions(document_id, version, blob_sha256, status, created_at) VALUES (?, 1, ?, 'queued', ?)", [id, sha256, now]);
+        this.db.run("INSERT INTO document_jobs(document_id, version_id, requested_at, available_at) VALUES (?, ?, ?, ?)", [id, Number(version.lastInsertRowid), now, now]);
+        return id;
+      }).immediate();
+      return this.getDocument(documentId);
+    } catch (error) {
+      this.db.run("DELETE FROM pages WHERE id = ?", [page.id]);
+      if (this.removeBlobIfOrphaned(sha256)) this.unlinkBlob(sha256);
+      throw error;
+    }
+  }
+
+  replaceDocument(documentId: number, filenameValue: string, mimeTypeValue: string, format: DocumentFormat, bytes: Uint8Array, maxBytes: number): DocumentRecord {
+    const current = this.getDocument(documentId);
+    const managed = this.db.query<DocumentRow, [number]>("SELECT * FROM documents WHERE id = ?").get(documentId)!;
+    const page = this.getById(current.pageId);
+    const humanEdited = page.title !== managed.managed_title || page.body !== managed.managed_body || JSON.stringify(page.tags) !== managed.managed_tags_json || JSON.stringify(page.properties) !== managed.managed_properties_json;
+    const filename = validateFilename(filenameValue);
+    if (bytes.byteLength > maxBytes) throw new AppError("document_too_large", `document exceeds the technical ${maxBytes} byte guard`, 413);
+    const mimeType = normalizeMimeType(mimeTypeValue);
+    const now = new Date().toISOString();
+    const sha256 = this.ensureBlob(bytes, mimeType, now);
+    try {
+      this.db.transaction(() => {
+        const nextVersion = current.currentVersion.version + 1;
+        this.db.run("UPDATE document_versions SET status = 'superseded' WHERE document_id = ? AND status IN ('queued', 'extracting')", [documentId]);
+        const version = this.db.run("INSERT INTO document_versions(document_id, version, blob_sha256, status, created_at) VALUES (?, ?, ?, 'queued', ?)", [documentId, nextVersion, sha256, now]);
+        this.db.run("UPDATE documents SET filename = ?, mime_type = ?, format = ?, status = 'queued', needs_ocr = 0, needs_review = ?, last_error = NULL, updated_at = ? WHERE id = ?", [filename, mimeType, format, humanEdited ? 1 : managed.needs_review, now, documentId]);
+        this.db.run("INSERT INTO document_jobs(document_id, version_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, ?, 0, 1) ON CONFLICT(document_id) DO UPDATE SET version_id = excluded.version_id, requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = document_jobs.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [documentId, Number(version.lastInsertRowid), now, now]);
+      }).immediate();
+      return this.getDocument(documentId);
+    } catch (error) {
+      if (this.removeBlobIfOrphaned(sha256)) this.unlinkBlob(sha256);
+      throw error;
+    }
+  }
+
+  getDocument(documentId: number): DocumentRecord {
+    if (!Number.isSafeInteger(documentId) || documentId < 1) throw new AppError("invalid_document_id", "document ID is invalid", 400);
+    const row = this.db.query<DocumentRow, [number]>("SELECT d.* FROM documents d JOIN pages p ON p.id = d.page_id WHERE d.id = ? AND p.deleted_at IS NULL").get(documentId);
+    if (!row) throw new AppError("document_not_found", "document not found", 404);
+    return this.hydrateDocument(row);
+  }
+
+  documentForPage(pageId: number): DocumentRecord | null {
+    const row = this.db.query<DocumentRow, [number]>("SELECT d.* FROM documents d JOIN pages p ON p.id = d.page_id WHERE d.page_id = ? AND p.deleted_at IS NULL").get(pageId);
+    return row ? this.hydrateDocument(row) : null;
+  }
+
+  listDocuments(): DocumentRecord[] {
+    return this.db.query<DocumentRow, []>("SELECT d.* FROM documents d JOIN pages p ON p.id = d.page_id WHERE p.deleted_at IS NULL ORDER BY d.updated_at DESC, d.id DESC").all().map((row) => this.hydrateDocument(row));
+  }
+
+  listDocumentVersions(documentId: number): DocumentVersion[] {
+    this.getDocument(documentId);
+    return this.db.query<DocumentVersionRow, [number]>(documentVersionSelect("dv.document_id = ?") + " ORDER BY dv.version DESC").all(documentId).map(toDocumentVersion);
+  }
+
+  documentSections(documentId: number, versionId?: number, offset = 0, limit?: number): DocumentSection[] {
+    const document = this.getDocument(documentId);
+    const selected = versionId ?? document.currentVersion.id;
+    const owner = this.db.query<{ found: number }, [number, number]>("SELECT 1 AS found FROM document_versions WHERE id = ? AND document_id = ?").get(selected, documentId);
+    if (!owner) throw new AppError("document_version_not_found", "document version not found", 404);
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new AppError("invalid_offset", "offset must be a non-negative integer", 400);
+    const sql = `SELECT * FROM document_sections WHERE document_version_id = ? ORDER BY ordinal${limit === undefined ? "" : " LIMIT ? OFFSET ?"}`;
+    const rows = limit === undefined
+      ? this.db.query<{ id: number; document_version_id: number; ordinal: number; kind: DocumentSection["kind"]; title: string | null; locator_json: string; text: string; hidden: number; needs_ocr: number }, [number]>(sql).all(selected)
+      : this.db.query<{ id: number; document_version_id: number; ordinal: number; kind: DocumentSection["kind"]; title: string | null; locator_json: string; text: string; hidden: number; needs_ocr: number }, [number, number, number]>(sql).all(selected, Math.max(1, Math.min(100, limit)), offset);
+    return rows.map((row) => ({ id: row.id, documentVersionId: row.document_version_id, ordinal: row.ordinal, kind: row.kind, title: row.title, locator: JSON.parse(row.locator_json), text: row.text, hidden: row.hidden === 1, needsOcr: row.needs_ocr === 1 }));
+  }
+
+  documentSectionCount(documentId: number, versionId?: number): number {
+    const document = this.getDocument(documentId);
+    const selected = versionId ?? document.currentVersion.id;
+    return this.db.query<{ count: number }, [number, number]>("SELECT count(*) AS count FROM document_sections ds JOIN document_versions dv ON dv.id = ds.document_version_id WHERE ds.document_version_id = ? AND dv.document_id = ?").get(selected, documentId)?.count ?? 0;
+  }
+
+  documentVersionPath(versionId: number): { document: DocumentRecord; version: DocumentVersion; path: string } {
+    const row = this.db.query<DocumentVersionRow, [number]>(documentVersionSelect("dv.id = ?")).get(versionId);
+    if (!row) throw new AppError("document_version_not_found", "document version not found", 404);
+    const document = this.getDocument(row.document_id);
+    return { document, version: toDocumentVersion(row), path: this.pathForHash(row.blob_sha256) };
+  }
+
+  claimDocumentTask(owner: string, leaseMilliseconds = 30 * 60_000): DocumentTask | null {
+    const now = new Date();
+    const until = new Date(now.getTime() + leaseMilliseconds).toISOString();
+    return this.db.transaction(() => {
+      const row = this.db.query<{ document_id: number; version_id: number; revision: number }, [string, string]>("SELECT document_id, version_id, revision FROM document_jobs WHERE attempts < 3 AND available_at <= ? AND (lease_until IS NULL OR lease_until < ?) ORDER BY requested_at, document_id LIMIT 1").get(now.toISOString(), now.toISOString());
+      if (!row) return null;
+      this.db.run("UPDATE document_jobs SET lease_owner = ?, lease_until = ? WHERE document_id = ? AND revision = ?", [owner, until, row.document_id, row.revision]);
+      this.db.run("UPDATE documents SET status = 'extracting', updated_at = ? WHERE id = ?", [now.toISOString(), row.document_id]);
+      this.db.run("UPDATE document_versions SET status = 'extracting' WHERE id = ?", [row.version_id]);
+      return { documentId: row.document_id, versionId: row.version_id, revision: row.revision, owner };
+    }).immediate();
+  }
+
+  renewDocumentLease(task: DocumentTask, leaseMilliseconds = 30 * 60_000): boolean {
+    return this.db.run("UPDATE document_jobs SET lease_until = ? WHERE document_id = ? AND version_id = ? AND revision = ? AND lease_owner = ?", [new Date(Date.now() + leaseMilliseconds).toISOString(), task.documentId, task.versionId, task.revision, task.owner]).changes === 1;
+  }
+
+  completeDocumentTask(task: DocumentTask, extraction: ExtractedDocument, parserVersion: string): void {
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      const current = this.db.query<{ revision: number; version_id: number; lease_owner: string | null }, [number]>("SELECT revision, version_id, lease_owner FROM document_jobs WHERE document_id = ?").get(task.documentId);
+      if (!current || current.revision !== task.revision || current.version_id !== task.versionId || current.lease_owner !== task.owner) return;
+      this.db.run("DELETE FROM document_sections WHERE document_version_id = ?", [task.versionId]);
+      const insert = this.db.query("INSERT INTO document_sections(document_version_id, ordinal, kind, title, locator_json, text, hidden, needs_ocr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+      extraction.sections.forEach((item, index) => insert.run(task.versionId, index, item.kind, item.title, JSON.stringify(item.locator), item.text, item.hidden ? 1 : 0, item.needsOcr ? 1 : 0));
+      this.db.run("UPDATE document_versions SET status = 'ready', parser_version = ?, metadata_json = ?, warnings_json = ?, extracted_at = ? WHERE id = ?", [parserVersion, JSON.stringify(extraction.metadata), JSON.stringify(extraction.warnings), now, task.versionId]);
+      this.db.run("UPDATE documents SET status = 'ready', needs_ocr = ?, last_error = NULL, updated_at = ? WHERE id = ?", [extraction.needsOcr ? 1 : 0, now, task.documentId]);
+      this.db.run("DELETE FROM document_jobs WHERE document_id = ? AND revision = ?", [task.documentId, task.revision]);
+    }).immediate();
+  }
+
+  failDocumentTask(task: DocumentTask, message: string, retryable = true): void {
+    const row = this.db.query<{ attempts: number }, [number, number, number, string]>("SELECT attempts FROM document_jobs WHERE document_id = ? AND version_id = ? AND revision = ? AND lease_owner = ?").get(task.documentId, task.versionId, task.revision, task.owner);
+    if (!row) return;
+    const attempts = retryable ? row.attempts + 1 : 3;
+    const failed = attempts >= 3;
+    const available = new Date(Date.now() + Math.min(60_000, 1000 * 2 ** attempts)).toISOString();
+    this.db.transaction(() => {
+      this.db.run("UPDATE document_jobs SET attempts = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, last_error = ? WHERE document_id = ? AND revision = ?", [attempts, available, message.slice(0, 2000), task.documentId, task.revision]);
+      this.db.run("UPDATE documents SET status = ?, last_error = ?, updated_at = ? WHERE id = ?", [failed ? "failed" : "queued", message.slice(0, 2000), new Date().toISOString(), task.documentId]);
+      this.db.run("UPDATE document_versions SET status = ? WHERE id = ?", [failed ? "failed" : "queued", task.versionId]);
+    }).immediate();
+  }
+
+  cancelDocument(documentId: number): DocumentRecord {
+    const document = this.getDocument(documentId);
+    if (document.status !== "queued" && document.status !== "extracting") throw new AppError("document_not_running", "document extraction is not queued or running", 409);
+    this.db.transaction(() => {
+      this.db.run("DELETE FROM document_jobs WHERE document_id = ?", [documentId]);
+      this.db.run("UPDATE documents SET status = 'cancelled', updated_at = ? WHERE id = ?", [new Date().toISOString(), documentId]);
+      this.db.run("UPDATE document_versions SET status = 'cancelled' WHERE id = ?", [document.currentVersion.id]);
+    }).immediate();
+    return this.getDocument(documentId);
+  }
+
+  retryDocument(documentId: number): DocumentRecord {
+    const document = this.getDocument(documentId);
+    if (document.status !== "failed" && document.status !== "cancelled") throw new AppError("document_not_retryable", "only failed or cancelled extraction can be retried", 409);
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.run("INSERT INTO document_jobs(document_id, version_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, ?, 0, 1) ON CONFLICT(document_id) DO UPDATE SET version_id = excluded.version_id, requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = document_jobs.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [documentId, document.currentVersion.id, now, now]);
+      this.db.run("UPDATE documents SET status = 'queued', last_error = NULL, updated_at = ? WHERE id = ?", [now, documentId]);
+      this.db.run("UPDATE document_versions SET status = 'queued' WHERE id = ?", [document.currentVersion.id]);
+    }).immediate();
+    return this.getDocument(documentId);
+  }
+
+  acknowledgeDocumentReview(documentId: number): DocumentRecord {
+    const document = this.getDocument(documentId);
+    const page = this.getById(document.pageId);
+    this.db.run("UPDATE documents SET needs_review = 0, managed_title = ?, managed_body = ?, managed_tags_json = ?, managed_properties_json = ?, updated_at = ? WHERE id = ?", [page.title, page.body, JSON.stringify(page.tags), JSON.stringify(page.properties), new Date().toISOString(), documentId]);
+    return this.getDocument(documentId);
+  }
+
+  documentBlobPath(documentId: number): { document: DocumentRecord; path: string } {
+    const document = this.getDocument(documentId);
+    return { document, path: this.pathForHash(document.currentVersion.sha256) };
+  }
+
+  private hydrateDocument(row: DocumentRow): DocumentRecord {
+    const version = this.db.query<DocumentVersionRow, [number]>(documentVersionSelect("dv.document_id = ?") + " ORDER BY dv.version DESC LIMIT 1").get(row.id);
+    if (!version) throw new Error(`document ${row.id} has no version`);
+    return { id: row.id, pageId: row.page_id, filename: row.filename, mimeType: row.mime_type, format: row.format, status: row.status, needsOcr: row.needs_ocr === 1, needsReview: row.needs_review === 1, lastError: row.last_error, createdAt: row.created_at, updatedAt: row.updated_at, currentVersion: toDocumentVersion(version) };
+  }
+
+  private ensureBlob(bytes: Uint8Array, mimeType: string, now: string): string {
+    const sha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex") as string;
+    const path = this.pathForHash(sha256);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    try { writeFileSync(path, bytes, { flag: "wx", mode: 0o600 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    this.db.run("INSERT OR IGNORE INTO attachment_blobs(sha256, size, mime_type, inline_safe, created_at) VALUES (?, ?, ?, 0, ?)", [sha256, bytes.byteLength, mimeType, now]);
+    return sha256;
   }
 
   addAttachment(pageId: number, filenameValue: string, mimeTypeValue: string, bytes: Uint8Array, maxBytes: number | null): Attachment {
@@ -774,6 +1076,9 @@ export class PageStore {
         [tombstoneAlias, current.alias, now, now, pageId],
       );
       this.db.run("DELETE FROM page_search WHERE page_id = ?", [pageId]);
+      this.db.run("DELETE FROM document_jobs WHERE document_id IN (SELECT id FROM documents WHERE page_id = ?)", [pageId]);
+      this.db.run("UPDATE document_versions SET status = 'cancelled' WHERE document_id IN (SELECT id FROM documents WHERE page_id = ?) AND status IN ('queued', 'extracting')", [pageId]);
+      this.db.run("UPDATE documents SET status = 'cancelled', updated_at = ? WHERE page_id = ? AND status IN ('queued', 'extracting')", [now, pageId]);
     });
     remove.immediate();
     return this.getDeletedById(pageId);
@@ -825,9 +1130,9 @@ export class PageStore {
 
   purgeDeleted(pageId: number): void {
     this.getDeletedById(pageId);
-    const hashes = this.db.query<{ sha256: string }, [number]>(
-      "SELECT DISTINCT blob_sha256 AS sha256 FROM page_attachments WHERE page_id = ?",
-    ).all(pageId).map(({ sha256 }) => sha256);
+    const hashes = this.db.query<{ sha256: string }, [number, number]>(
+      "SELECT blob_sha256 AS sha256 FROM page_attachments WHERE page_id = ? UNION SELECT dv.blob_sha256 AS sha256 FROM document_versions dv JOIN documents d ON d.id = dv.document_id WHERE d.page_id = ?",
+    ).all(pageId, pageId).map(({ sha256 }) => sha256);
     const purge = this.db.transaction(() => {
       this.db.run("DELETE FROM pages WHERE id = ?", [pageId]);
       return hashes.filter((hash) => this.removeBlobIfOrphaned(hash));
@@ -1007,7 +1312,7 @@ export class PageStore {
   }
 
   private removeBlobIfOrphaned(sha256: string): boolean {
-    const referenced = this.db.query<{ found: number }, [string]>("SELECT 1 AS found FROM page_attachments WHERE blob_sha256 = ? LIMIT 1").get(sha256);
+    const referenced = this.db.query<{ found: number }, [string, string]>("SELECT 1 AS found FROM page_attachments WHERE blob_sha256 = ? UNION ALL SELECT 1 AS found FROM document_versions WHERE blob_sha256 = ? LIMIT 1").get(sha256, sha256);
     if (referenced) return false;
     this.db.run("DELETE FROM attachment_blobs WHERE sha256 = ?", [sha256]);
     return true;
@@ -1033,6 +1338,19 @@ export class PageStore {
       [pageId],
     );
   }
+}
+
+function documentVersionSelect(where: string): string {
+  return `SELECT dv.id, dv.document_id, dv.version, dv.blob_sha256, b.size, dv.status, dv.parser_version, dv.metadata_json, dv.warnings_json, dv.created_at, dv.extracted_at
+    FROM document_versions dv JOIN attachment_blobs b ON b.sha256 = dv.blob_sha256 WHERE ${where}`;
+}
+
+function toDocumentVersion(row: DocumentVersionRow): DocumentVersion {
+  let warnings: unknown = [];
+  let metadata: unknown = {};
+  try { warnings = JSON.parse(row.warnings_json); } catch { warnings = []; }
+  try { metadata = JSON.parse(row.metadata_json); } catch { metadata = {}; }
+  return { id: row.id, documentId: row.document_id, version: row.version, sha256: row.blob_sha256, size: row.size, status: row.status, parserVersion: row.parser_version, metadata: metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata as Record<string, string | number | boolean | null> : {}, warnings: Array.isArray(warnings) ? warnings.filter((item): item is string => typeof item === "string") : [], createdAt: row.created_at, extractedAt: row.extracted_at };
 }
 
 function attachmentSelect(where: string): string {

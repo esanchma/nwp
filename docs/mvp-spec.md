@@ -234,6 +234,8 @@ Version 0.8 adds a versioned OpenAPI 3.1 contract for every `/api/v1` operation,
 
 Version 0.9 adds a canonical tag taxonomy with aliases and kinds, deterministic page chunks, a durable semantic indexing queue, embedded sqlite-vec loading, Ollama embeddings, and hybrid FTS/vector ranking with lexical fallback. Indexing can run in a separate worker, as a one-shot command, or inside the server. Web, REST/OpenAPI, CLI, and MCP expose taxonomy and index status.
 
+Version 0.10 delivers the first document-RAG foundation: content-addressed original and version storage, linked wiki pages, managed-field review detection, a leased durable extraction queue, and structured extraction for DOCX, XLSX, PPTX, PDF, Markdown, and TXT. Extracted sections retain page, slide, heading, sheet, and range locators; embedded images and low-text PDF pages are marked for later OCR. Office ZIP/XML, PDF-page, spreadsheet-cell, upload-memory, and decompression guards protect the local worker. Web, REST/OpenAPI, CLI, MCP, and complete exports expose document metadata and content.
+
 ## Roadmap
 
 The following decisions describe the remaining product vision and do not expand the original MVP scope.

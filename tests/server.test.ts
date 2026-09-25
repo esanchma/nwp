@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Config } from "../src/config.ts";
 import { PageStore } from "../src/database.ts";
 import { createRequestHandler } from "../src/server.ts";
+import { DocumentWorker } from "../src/documents.ts";
 
 let dir: string;
 let store: PageStore;
@@ -23,6 +24,7 @@ beforeEach(async () => {
     configPath: join(dir, "config.toml"),
     attachmentMaxBytes: null,
     semanticSearch: { enabled: false, ollamaUrl: "http://127.0.0.1:11434", embeddingModel: "bge-m3", embeddingDimensions: 1024, queryPrefix: "", chunkCharacters: 1600, chunkOverlap: 200 },
+    documentRag: { enabled: true, maxFileBytes: 10_000_000, maxExpandedBytes: 50_000_000, maxArchiveEntries: 10_000, maxCompressionRatio: 1000, maxPdfPages: 10_000, maxSpreadsheetCells: 5_000_000 },
   };
   store = new PageStore(config.dbPath);
   handler = await createRequestHandler(store, config, token);
@@ -53,7 +55,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.9.0" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.10.0" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });
@@ -78,6 +80,33 @@ describe("HTTP API", () => {
     }));
     expect(updated.status).toBe(200);
     expect((await updated.json() as { body: string }).body).toBe("two");
+  });
+
+  test("imports, extracts, reads, and explicitly replaces documents", async () => {
+    const importedResponse = await handler(api("/api/v1/documents?filename=notes.txt", { method: "POST", headers: { "Content-Type": "text/plain" }, body: "first source" }));
+    expect(importedResponse.status).toBe(202);
+    const imported = await importedResponse.json() as { id: number; pageId: number; status: string };
+    expect(imported.status).toBe("queued");
+    expect(await new DocumentWorker(store, { enabled: true, maxFileBytes: 10_000_000, maxExpandedBytes: 50_000_000, maxArchiveEntries: 10_000, maxCompressionRatio: 1000, maxPdfPages: 10_000, maxSpreadsheetCells: 5_000_000 }).runUntilIdle()).toBe(1);
+    const content = await (await handler(api(`/api/v1/documents/${imported.id}/content`))).json() as { sections: Array<{ text: string }> };
+    expect(content.sections[0]?.text).toBe("first source");
+    expect((await handler(request(`/wiki/${store.getById(imported.pageId).alias}`))).status).toBe(200);
+
+    const replaced = await handler(api(`/api/v1/documents/${imported.id}/versions?filename=notes-v2.txt`, { method: "POST", headers: { "Content-Type": "text/plain" }, body: "second source" }));
+    expect(replaced.status).toBe(202);
+    const versions = await (await handler(api(`/api/v1/documents/${imported.id}/versions`))).json() as { versions: unknown[] };
+    expect(versions.versions).toHaveLength(2);
+    store.update(imported.pageId, { body: "human summary" }, "web");
+    await handler(api(`/api/v1/documents/${imported.id}/versions?filename=notes-v3.txt`, { method: "POST", headers: { "Content-Type": "text/plain" }, body: "third source" }));
+    expect(store.getDocument(imported.id).needsReview).toBe(true);
+    expect((await handler(api(`/api/v1/documents/${imported.id}/review`, { method: "POST" }))).status).toBe(200);
+    expect(store.getDocument(imported.id).needsReview).toBe(false);
+
+    const cancellable = await (await handler(api("/api/v1/documents?filename=cancel.txt", { method: "POST", headers: { "Content-Type": "text/plain" }, body: "cancel me" }))).json() as { id: number };
+    expect((await handler(api(`/api/v1/documents/${cancellable.id}/cancel`, { method: "POST" }))).status).toBe(200);
+    expect(store.getDocument(cancellable.id).status).toBe("cancelled");
+    expect((await handler(api(`/api/v1/documents/${cancellable.id}/retry`, { method: "POST" }))).status).toBe(200);
+    expect(store.getDocument(cancellable.id).status).toBe("queued");
   });
 
   test("manages tag taxonomy and semantic status through the API", async () => {
@@ -202,7 +231,7 @@ describe("HTTP API", () => {
     }));
     expect(toolsResponse.status).toBe(200);
     const tools = await toolsResponse.json() as { result: { tools: Array<{ name: string }> } };
-    expect(tools.result.tools.map(({ name }) => name).sort()).toEqual(["create_page", "define_tag", "delete_attachment", "delete_page", "export_page", "get_attachment", "get_attachment_upload_instructions", "get_deleted_page", "get_full_export", "get_page", "get_page_tree", "get_revision_diff", "import_page", "list_attachments", "list_pages", "list_revisions", "list_tag_definitions", "list_trash", "purge_page", "restore_page", "restore_revision", "search_pages", "semantic_index_status", "update_page"]);
+    expect(tools.result.tools.map(({ name }) => name).sort()).toEqual(["acknowledge_document_review", "cancel_document_extraction", "create_page", "define_tag", "delete_attachment", "delete_page", "export_page", "get_attachment", "get_attachment_upload_instructions", "get_deleted_page", "get_document", "get_document_content", "get_document_upload_instructions", "get_full_export", "get_page", "get_page_tree", "get_revision_diff", "import_page", "list_attachments", "list_documents", "list_pages", "list_revisions", "list_tag_definitions", "list_trash", "purge_page", "restore_page", "restore_revision", "retry_document_extraction", "search_pages", "semantic_index_status", "update_page"]);
   });
 });
 

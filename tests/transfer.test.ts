@@ -63,6 +63,7 @@ describe("complete export", () => {
     const deleted = db.create({ title: "Deleted", body: "gone", tags: [] }, "web");
     db.deletePage(deleted.id);
     const attachment = db.addAttachment(active.id, "file.txt", "text/plain", new TextEncoder().encode("content"), null);
+    const document = db.createDocument("source.txt", "text/plain", "text", new TextEncoder().encode("document source"), "web", 1_000_000);
 
     const archive = createFullExport(db);
     const compressed = Buffer.from(await new Response(archive.stream).arrayBuffer());
@@ -72,9 +73,11 @@ describe("complete export", () => {
     expect(entries.has(`trash/${deleted.id}.md`)).toBe(true);
     expect([...entries.keys()].some((name) => name.startsWith(`history/${active.id}/`))).toBe(true);
     expect(entries.get(`attachments/${attachment.sha256}`)?.toString()).toBe("content");
-    const manifest = JSON.parse(entries.get("manifest.json")!.toString()) as { format: string; attachments: unknown[] };
+    expect(entries.get(`documents/${document.currentVersion.sha256}`)?.toString()).toBe("document source");
+    const manifest = JSON.parse(entries.get("manifest.json")!.toString()) as { format: string; attachments: unknown[]; documents: unknown[] };
     expect(manifest.format).toBe("nwp-export");
     expect(manifest.attachments).toHaveLength(1);
+    expect(manifest.documents).toHaveLength(1);
   });
 });
 
