@@ -1,12 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { basename, extname, posix } from "node:path";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, extname, join, posix } from "node:path";
 import { unzipSync, type Unzipped } from "fflate";
 import { XMLParser } from "fast-xml-parser";
 import pdfWorkerSource from "pdfjs-dist/legacy/build/pdf.worker.mjs" with { type: "text" };
 import type { DocumentRagConfig } from "./config.ts";
 import type { PageStore } from "./database.ts";
-import { AppError, type DocumentFormat, type DocumentLocator, type DocumentSectionKind } from "./domain.ts";
+import { AppError, type DocumentFormat, type DocumentLocator, type DocumentSectionKind, type OcrStatus } from "./domain.ts";
 
 export const DOCUMENT_PARSER_VERSION = "nwp-documents/1";
 
@@ -25,6 +27,7 @@ export interface ExtractedDocument {
   sections: ExtractedDocumentSection[];
   warnings: string[];
   needsOcr: boolean;
+  ocrStatus: OcrStatus;
 }
 
 const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "", removeNSPrefix: true, parseTagValue: false, trimValues: false, processEntities: false });
@@ -77,7 +80,8 @@ export class DocumentWorker {
     try {
       const source = this.store.documentVersionPath(task.versionId);
       const bytes = new Uint8Array(readFileSync(source.path));
-      const extraction = await extractDocument(source.document.filename, source.document.mimeType, bytes, this.config);
+      const extracted = await extractDocument(source.document.filename, source.document.mimeType, bytes, this.config);
+      const extraction = await applyDocumentOcr(source.document.format, bytes, extracted, this.config);
       this.store.completeDocumentTask(task, extraction, DOCUMENT_PARSER_VERSION);
     } catch (error) {
       this.store.failDocumentTask(task, error instanceof Error ? error.message : String(error), !(error instanceof AppError && error.status < 500));
@@ -256,6 +260,211 @@ async function extractPdf(bytes: Uint8Array, config: DocumentRagConfig): Promise
   }
 }
 
+interface OcrCandidate {
+  bytes: Uint8Array;
+  extension: string;
+  locator: DocumentLocator;
+  hidden: boolean;
+}
+
+export async function applyDocumentOcr(format: DocumentFormat, bytes: Uint8Array, extraction: ExtractedDocument, config: DocumentRagConfig): Promise<ExtractedDocument> {
+  if (!extraction.needsOcr) return { ...extraction, ocrStatus: "not_required" };
+  if (!config.enabled || !config.ocrEnabled) return { ...extraction, metadata: { ...extraction.metadata, "ocr.status": "pending" }, ocrStatus: "pending", warnings: replaceOcrWarnings(extraction.warnings, [config.enabled ? "OCR is disabled; text remains pending" : "Document ingestion is disabled; OCR remains pending"]) };
+
+  const availability = await tesseractAvailability(config);
+  if (availability) return { ...extraction, metadata: { ...extraction.metadata, "ocr.engine": "tesseract", "ocr.languages": config.ocrLanguages.join("+"), "ocr.status": "unavailable" }, ocrStatus: "unavailable", warnings: replaceOcrWarnings(extraction.warnings, [availability]) };
+
+  const directory = await mkdtemp(join(tmpdir(), "nwp-ocr-"));
+  await chmod(directory, 0o700);
+  try {
+    const result = format === "pdf"
+      ? await ocrPdf(bytes, extraction, config, directory)
+      : await ocrOffice(format, bytes, extraction, config, directory);
+    return {
+      ...result,
+      metadata: { ...result.metadata, "ocr.engine": "tesseract", "ocr.languages": config.ocrLanguages.join("+"), "ocr.status": result.ocrStatus },
+    };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+async function ocrPdf(bytes: Uint8Array, extraction: ExtractedDocument, config: DocumentRagConfig, directory: string): Promise<ExtractedDocument> {
+  const pending = extraction.sections.filter((item) => item.needsOcr && item.locator.page !== undefined);
+  if (pending.length > config.maxOcrItems) return { ...extraction, ocrStatus: "unavailable", warnings: replaceOcrWarnings(extraction.warnings, [`OCR requires ${pending.length} pages, exceeding the technical ${config.maxOcrItems} item guard`]) };
+  const source = join(directory, "source.pdf");
+  await writeFile(source, bytes, { mode: 0o600 });
+  const replacements = new Map<number, string>();
+  const warnings: string[] = [];
+  for (const item of pending) {
+    const page = item.locator.page!;
+    const prefix = join(directory, `page-${page}`);
+    try {
+      const text = await withOcrRetry(async () => {
+        await runCommand(config.pdfRendererCommand, ["-png", "-r", "200", "-f", String(page), "-l", String(page), "-singlefile", source, prefix], config.ocrTimeoutSeconds, 64 * 1024);
+        return recognizeImage(`${prefix}.png`, config);
+      });
+      if (text) replacements.set(page, text);
+      else warnings.push(`OCR found no text on PDF page ${page}`);
+    } catch (error) {
+      warnings.push(`OCR failed on PDF page ${page}: ${errorMessage(error)}`);
+    }
+  }
+  const sections = extraction.sections.map((item) => {
+    const page = item.locator.page;
+    const text = page === undefined ? undefined : replacements.get(page);
+    return text ? { ...item, text: item.text ? `${item.text}\n\nOCR: ${text}` : text, needsOcr: false, locator: { ...item.locator, part: "OCR" } } : item;
+  });
+  return finishOcr(extraction, sections, replacements.size, pending.length - replacements.size, warnings);
+}
+
+async function ocrOffice(format: DocumentFormat, bytes: Uint8Array, extraction: ExtractedDocument, config: DocumentRagConfig, directory: string): Promise<ExtractedDocument> {
+  if (format !== "docx" && format !== "pptx") return { ...extraction, ocrStatus: "unavailable", warnings: replaceOcrWarnings(extraction.warnings, ["OCR candidates are not available for this format"]) };
+  const archive = openOfficeArchive(bytes, config);
+  const candidates = officeOcrCandidates(format, archive);
+  if (candidates.length > config.maxOcrItems) return { ...extraction, ocrStatus: "unavailable", warnings: replaceOcrWarnings(extraction.warnings, [`OCR requires ${candidates.length} images, exceeding the technical ${config.maxOcrItems} item guard`]) };
+  const recognized = new Map<string, string>();
+  const sections: ExtractedDocumentSection[] = [...extraction.sections];
+  const warnings: string[] = [];
+  let successes = 0;
+  let unresolved = 0;
+  for (const [index, candidate] of candidates.entries()) {
+    const extension = candidate.extension.toLowerCase();
+    if (!/^(png|jpe?g|tiff?|bmp|webp|gif)$/.test(extension)) {
+      unresolved += 1;
+      warnings.push(`OCR skipped unsupported image format .${extension || "unknown"} at ${candidate.locator.label}`);
+      continue;
+    }
+    const hash = createHash("sha256").update(candidate.bytes).digest("hex");
+    let text = recognized.get(hash);
+    try {
+      if (text === undefined) {
+        const path = join(directory, `image-${index}.${extension}`);
+        await writeFile(path, candidate.bytes, { mode: 0o600 });
+        text = await withOcrRetry(() => recognizeImage(path, config));
+        recognized.set(hash, text);
+      }
+      if (!text) {
+        unresolved += 1;
+        warnings.push(`OCR found no text at ${candidate.locator.label}`);
+        continue;
+      }
+      successes += 1;
+      sections.push(section("image", `OCR: ${candidate.locator.label}`, candidate.locator, text, candidate.hidden));
+    } catch (error) {
+      unresolved += 1;
+      warnings.push(`OCR failed at ${candidate.locator.label}: ${errorMessage(error)}`);
+    }
+  }
+  return finishOcr(extraction, sections, successes, unresolved, warnings);
+}
+
+function officeOcrCandidates(format: "docx" | "pptx", archive: Unzipped): OcrCandidate[] {
+  if (format === "docx") return Object.entries(archive).filter(([name]) => name.startsWith("word/media/")).sort(([left], [right]) => left.localeCompare(right)).map(([name, bytes]) => ({ bytes, extension: extname(name).slice(1), locator: { label: `Embedded image: ${basename(name)}`, image: basename(name), part: name }, hidden: false }));
+  const candidates: OcrCandidate[] = [];
+  const used = new Set<string>();
+  const slides = Object.keys(archive).filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name)).sort(numericPathSort);
+  for (const [index, slideName] of slides.entries()) {
+    const slideNumber = index + 1;
+    const slideXml = decodeXml(archive[slideName]!, slideName);
+    const hidden = /<(?:p:)?sld\b[^>]*\bshow=["'](?:0|false)["']/.test(slideXml);
+    const relationshipName = `ppt/slides/_rels/${basename(slideName)}.rels`;
+    if (!archive[relationshipName]) continue;
+    const relationships = relationshipEntries(decodeXml(archive[relationshipName]!, relationshipName)).filter((item) => item.type.endsWith("/image"));
+    relationships.forEach((relationship, imageIndex) => {
+      const path = posix.normalize(posix.join(posix.dirname(slideName), relationship.target));
+      const image = archive[path];
+      if (!image) return;
+      used.add(path);
+      candidates.push({ bytes: image, extension: extname(path).slice(1), locator: { label: `Slide ${slideNumber}, image ${imageIndex + 1}`, slide: slideNumber, image: basename(path), part: hidden ? "hidden slide image" : "slide image" }, hidden });
+    });
+  }
+  for (const [name, bytes] of Object.entries(archive).filter(([name]) => name.startsWith("ppt/media/") && !used.has(name)).sort(([left], [right]) => left.localeCompare(right))) candidates.push({ bytes, extension: extname(name).slice(1), locator: { label: `Embedded image: ${basename(name)}`, image: basename(name), part: name }, hidden: false });
+  return candidates;
+}
+
+function relationshipEntries(xml: string): Array<{ type: string; target: string }> {
+  return findObjects(parseXml(xml, "relationships"), "Relationship").filter((item) => item.Type && item.Target).map((item) => ({ type: String(item.Type), target: String(item.Target) }));
+}
+
+function finishOcr(extraction: ExtractedDocument, sections: ExtractedDocumentSection[], successes: number, unresolved: number, warnings: string[]): ExtractedDocument {
+  const ocrStatus: OcrStatus = unresolved === 0 && successes > 0 ? "completed" : successes > 0 ? "partial" : "unavailable";
+  const summary = successes ? [`OCR extracted text from ${successes} item(s)`] : [];
+  return { ...extraction, sections, metadata: { ...extraction.metadata, "ocr.successfulItems": successes, "ocr.unresolvedItems": unresolved }, needsOcr: unresolved > 0, ocrStatus, warnings: replaceOcrWarnings(extraction.warnings, [...summary, ...warnings]) };
+}
+
+function replaceOcrWarnings(existing: string[], additions: string[]): string[] {
+  return [...existing.filter((warning) => !/await OCR|pages await OCR/i.test(warning)), ...additions];
+}
+
+export async function ocrRuntimeStatus(config: DocumentRagConfig): Promise<{ enabled: boolean; available: boolean; pdfRendererAvailable: boolean; tesseractCommand: string; pdfRendererCommand: string; languages: string[]; tesseractError: string | null; pdfRendererError: string | null }> {
+  if (!config.enabled || !config.ocrEnabled) return { enabled: false, available: false, pdfRendererAvailable: false, tesseractCommand: config.tesseractCommand, pdfRendererCommand: config.pdfRendererCommand, languages: config.ocrLanguages, tesseractError: config.enabled ? "OCR is disabled" : "Document ingestion is disabled", pdfRendererError: null };
+  const tesseractError = await tesseractAvailability(config);
+  let pdfRendererError: string | null = null;
+  try { await runCommand(config.pdfRendererCommand, ["-v"], Math.min(30, config.ocrTimeoutSeconds), 64 * 1024); }
+  catch (error) { pdfRendererError = errorMessage(error); }
+  return { enabled: true, available: !tesseractError, pdfRendererAvailable: !pdfRendererError, tesseractCommand: config.tesseractCommand, pdfRendererCommand: config.pdfRendererCommand, languages: config.ocrLanguages, tesseractError, pdfRendererError };
+}
+
+async function tesseractAvailability(config: DocumentRagConfig): Promise<string | null> {
+  try {
+    const output = await runCommand(config.tesseractCommand, ["--list-langs"], Math.min(30, config.ocrTimeoutSeconds), 64 * 1024);
+    const available = new Set(output.split(/\r?\n/).map((item) => item.trim()).filter(Boolean));
+    const missing = config.ocrLanguages.filter((language) => !available.has(language));
+    return missing.length ? `Tesseract language data is unavailable: ${missing.join(", ")}` : null;
+  } catch (error) {
+    return `Tesseract is unavailable: ${errorMessage(error)}`;
+  }
+}
+
+async function withOcrRetry<T>(operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch { await Bun.sleep(100); return operation(); }
+}
+
+async function recognizeImage(path: string, config: DocumentRagConfig): Promise<string> {
+  return (await runCommand(config.tesseractCommand, [path, "stdout", "-l", config.ocrLanguages.join("+"), "--psm", "6"], config.ocrTimeoutSeconds, config.maxOcrOutputCharacters * 4)).replace(/\s+/g, " ").trim().slice(0, config.maxOcrOutputCharacters);
+}
+
+async function runCommand(command: string, args: string[], timeoutSeconds: number, maxOutputBytes: number): Promise<string> {
+  let process: ReturnType<typeof Bun.spawn>;
+  try { process = Bun.spawn([command, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" }); }
+  catch (error) { throw new Error(`cannot start '${command}': ${errorMessage(error)}`); }
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; process.kill(9); }, timeoutSeconds * 1000);
+  const stdout = readBoundedStream(process.stdout as ReadableStream<Uint8Array>, maxOutputBytes, () => process.kill(9));
+  const stderr = readBoundedStream(process.stderr as ReadableStream<Uint8Array>, 64 * 1024, () => process.kill(9));
+  let code: number;
+  let output: string;
+  let errors: string;
+  try { [code, output, errors] = await Promise.all([process.exited, stdout, stderr]); }
+  finally { clearTimeout(timer); }
+  if (timedOut) throw new Error(`'${command}' timed out after ${timeoutSeconds} seconds`);
+  if (code !== 0) throw new Error(`'${command}' exited ${code}: ${errors.trim().slice(0, 500)}`);
+  return output;
+}
+
+async function readBoundedStream(stream: ReadableStream<Uint8Array>, maximum: number, overflow: () => void): Promise<string> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maximum) { overflow(); throw new Error(`process output exceeds ${maximum} bytes`); }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return decoder.decode(bytes);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function loadPdfJs(): Promise<typeof import("pdfjs-dist/legacy/build/pdf.mjs")> {
   if (pdfJsPromise) return pdfJsPromise;
   pdfJsPromise = (async () => {
@@ -322,7 +531,7 @@ function finish(title: string | null, sections: ExtractedDocumentSection[], warn
   });
   if (!usable.length && !needsOcr) warnings.push("no extractable text was found");
   const normalizedTitle = title?.trim() || null;
-  return { title: normalizedTitle, metadata: normalizedTitle ? { ...metadata, title: normalizedTitle } : metadata, sections: usable, warnings, needsOcr };
+  return { title: normalizedTitle, metadata: normalizedTitle ? { ...metadata, title: normalizedTitle } : metadata, sections: usable, warnings, needsOcr, ocrStatus: needsOcr ? "pending" : "not_required" };
 }
 
 function requiredXml(archive: Unzipped, path: string, label: string): string {

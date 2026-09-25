@@ -20,6 +20,13 @@ export interface DocumentRagConfig {
   maxCompressionRatio: number;
   maxPdfPages: number;
   maxSpreadsheetCells: number;
+  ocrEnabled: boolean;
+  tesseractCommand: string;
+  pdfRendererCommand: string;
+  ocrLanguages: string[];
+  ocrTimeoutSeconds: number;
+  maxOcrItems: number;
+  maxOcrOutputCharacters: number;
 }
 
 export interface Config {
@@ -91,16 +98,24 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     maxCompressionRatio: numberValue(documents.max_compression_ratio, "document_rag.max_compression_ratio", 1000),
     maxPdfPages: numberValue(documents.max_pdf_pages, "document_rag.max_pdf_pages", 10_000),
     maxSpreadsheetCells: numberValue(documents.max_spreadsheet_cells, "document_rag.max_spreadsheet_cells", 5_000_000),
+    ocrEnabled: booleanValue(documents.ocr_enabled, "document_rag.ocr_enabled", true),
+    tesseractCommand: stringValue(documents.tesseract_command, "document_rag.tesseract_command", "tesseract"),
+    pdfRendererCommand: stringValue(documents.pdf_renderer_command, "document_rag.pdf_renderer_command", "pdftoppm"),
+    ocrLanguages: stringArrayValue(documents.ocr_languages, "document_rag.ocr_languages", ["spa", "eng"]),
+    ocrTimeoutSeconds: numberValue(documents.ocr_timeout_seconds, "document_rag.ocr_timeout_seconds", 120),
+    maxOcrItems: numberValue(documents.max_ocr_items, "document_rag.max_ocr_items", 10_000),
+    maxOcrOutputCharacters: numberValue(documents.max_ocr_output_characters, "document_rag.max_ocr_output_characters", 1_000_000),
   };
 
   if (!Number.isInteger(semanticSearch.embeddingDimensions) || semanticSearch.embeddingDimensions < 1) throw new Error("semantic_search.embedding_dimensions must be a positive integer");
   if (!Number.isInteger(semanticSearch.chunkCharacters) || semanticSearch.chunkCharacters < 200) throw new Error("semantic_search.chunk_characters must be an integer of at least 200");
   if (!Number.isInteger(semanticSearch.chunkOverlap) || semanticSearch.chunkOverlap < 0 || semanticSearch.chunkOverlap >= semanticSearch.chunkCharacters) throw new Error("semantic_search.chunk_overlap must be smaller than chunk_characters");
 
-  for (const [name, value] of Object.entries({ max_file_bytes: documentRag.maxFileBytes, max_expanded_bytes: documentRag.maxExpandedBytes, max_archive_entries: documentRag.maxArchiveEntries, max_compression_ratio: documentRag.maxCompressionRatio, max_pdf_pages: documentRag.maxPdfPages, max_spreadsheet_cells: documentRag.maxSpreadsheetCells })) {
+  for (const [name, value] of Object.entries({ max_file_bytes: documentRag.maxFileBytes, max_expanded_bytes: documentRag.maxExpandedBytes, max_archive_entries: documentRag.maxArchiveEntries, max_compression_ratio: documentRag.maxCompressionRatio, max_pdf_pages: documentRag.maxPdfPages, max_spreadsheet_cells: documentRag.maxSpreadsheetCells, ocr_timeout_seconds: documentRag.ocrTimeoutSeconds, max_ocr_items: documentRag.maxOcrItems, max_ocr_output_characters: documentRag.maxOcrOutputCharacters })) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error(`document_rag.${name} must be a positive integer`);
   }
   if (documentRag.maxExpandedBytes < documentRag.maxFileBytes) throw new Error("document_rag.max_expanded_bytes must not be smaller than max_file_bytes");
+  if (!documentRag.ocrLanguages.length || documentRag.ocrLanguages.some((language) => !/^[a-zA-Z0-9_]{2,32}$/.test(language))) throw new Error("document_rag.ocr_languages must contain language identifiers");
 
   if (attachmentMaxBytes !== null && (!Number.isSafeInteger(attachmentMaxBytes) || attachmentMaxBytes < 1)) {
     throw new Error("max_attachment_bytes must be zero (unlimited) or a positive integer");
@@ -138,6 +153,12 @@ function objectValue(value: unknown, name: string): Record<string, unknown> {
   if (value === undefined) return {};
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${name} must be a TOML table`);
   return value as Record<string, unknown>;
+}
+
+function stringArrayValue(value: unknown, name: string, fallback: string[]): string[] {
+  if (value === undefined) return fallback;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) throw new Error(`${name} must be an array of non-empty strings`);
+  return [...new Set(value.map((item) => item.trim()))];
 }
 
 function numberValue(value: unknown, name: string, fallback: number): number {

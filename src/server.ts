@@ -5,19 +5,19 @@ import swaggerUiBundle from "swagger-ui-dist/swagger-ui-bundle.js" with { type: 
 import swaggerUiCss from "swagger-ui-dist/swagger-ui.css" with { type: "text" };
 import type { Config } from "./config.ts";
 import type { PageStore } from "./database.ts";
-import { AppError, type Attachment, type ChangeSource, type DeletedPage, type Page, type PageProperties, type PageStatus, type PageSummary, type RevisionList } from "./domain.ts";
+import { AppError, type Attachment, type ChangeSource, type DeletedPage, type DocumentLocator, type Page, type PageProperties, type PageStatus, type PageSummary, type RevisionList } from "./domain.ts";
 import { compareRevision, type PageDiff } from "./history.ts";
 import { escapeHtml, renderMarkdown } from "./markdown.ts";
 import { createMcpHandler } from "./mcp.ts";
 import { openApiJson } from "./openapi.ts";
 import { createFullExport, exportPageMarkdown, importPageMarkdown } from "./transfer.ts";
 import { hybridSearch, OllamaEmbedder } from "./semantic.ts";
-import { canonicalDocumentMime, documentFormat } from "./documents.ts";
+import { canonicalDocumentMime, documentFormat, ocrRuntimeStatus } from "./documents.ts";
 
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024 + 64 * 1024;
 
 export async function createRequestHandler(store: PageStore, config: Config, apiToken: string): Promise<(request: Request) => Promise<Response>> {
-  const handleMcp = await createMcpHandler(store, config.semanticSearch);
+  const handleMcp = await createMcpHandler(store, config.semanticSearch, config.documentRag);
   const embedder = config.semanticSearch.enabled ? new OllamaEmbedder(config.semanticSearch) : null;
   const allowedHosts = new Set([`${config.host}:${config.port}`, `localhost:${config.port}`, `127.0.0.1:${config.port}`]);
 
@@ -83,6 +83,7 @@ async function apiRoute(request: Request, url: URL, store: PageStore, config: Co
   const documentRetryMatch = /^\/api\/v1\/documents\/(\d+)\/retry$/.exec(url.pathname);
 
   if (request.method === "GET" && url.pathname === "/api/v1/openapi.json") return openApiResponse();
+  if (request.method === "GET" && url.pathname === "/api/v1/documents/ocr/status") return json(await ocrRuntimeStatus(config.documentRag));
   if (request.method === "GET" && url.pathname === "/api/v1/documents") return json({ documents: store.listDocuments() });
   if (request.method === "POST" && url.pathname === "/api/v1/documents") {
     if (!config.documentRag.enabled) throw new AppError("document_rag_disabled", "document ingestion is disabled", 503);
@@ -252,7 +253,7 @@ async function webRoute(request: Request, url: URL, store: PageStore, config: Co
   if (request.method === "GET" && url.pathname === "/openapi.json") return openApiResponse();
   if (request.method === "GET" && url.pathname === "/export/all") return fullExportResponse(store);
   if (request.method === "GET" && url.pathname === "/documents") {
-    const items = store.listDocuments().map((document) => `<li><a href="/wiki/${encodeURIComponent(store.getById(document.pageId).alias)}">${escapeHtml(document.filename)}</a><small>${escapeHtml(document.format.toUpperCase())} · version ${document.currentVersion.version} · ${escapeHtml(document.status)}${document.needsOcr ? " · OCR pending" : ""}</small></li>`).join("");
+    const items = store.listDocuments().map((document) => `<li><a href="/wiki/${encodeURIComponent(store.getById(document.pageId).alias)}">${escapeHtml(document.filename)}</a><small>${escapeHtml(document.format.toUpperCase())} · version ${document.currentVersion.version} · ${escapeHtml(document.status)} · OCR ${escapeHtml(document.ocrStatus)}${document.needsOcr ? " (pending)" : ""}</small></li>`).join("");
     return html(layout("Documents", `<div class="title-row"><h1>Documents</h1><a class="button" href="/documents/import">Import document</a></div>${items ? `<ul class="page-list">${items}</ul>` : "<p>No documents yet.</p>"}`, csrf), 200, headers);
   }
   if (request.method === "GET" && url.pathname === "/documents/import") {
@@ -291,7 +292,7 @@ async function webRoute(request: Request, url: URL, store: PageStore, config: Co
     const offset = nonNegativeInteger(url.searchParams.get("offset"));
     const sections = store.documentSections(documentId, undefined, offset, 50);
     const total = store.documentSectionCount(documentId);
-    const content = sections.map((item) => `<section class="document-section"><h2>${escapeHtml(item.locator.label)}${item.hidden ? " <small>(hidden)</small>" : ""}${item.needsOcr ? " <small>(OCR pending)</small>" : ""}</h2><pre>${escapeHtml(item.text)}</pre></section>`).join("");
+    const content = sections.map((item) => { const citation = `/documents/${documentId}/content?offset=${Math.floor(item.ordinal / 50) * 50}#section-${item.ordinal}`; return `<section class="document-section" id="section-${item.ordinal}"><h2>${escapeHtml(item.locator.label)}${item.hidden ? " <small>(hidden)</small>" : ""}${item.needsOcr ? " <small>(OCR pending)</small>" : ""}</h2><p><small>${escapeHtml(locatorDetails(item.locator))} · <a href="${citation}">citation §${item.ordinal + 1}</a></small></p><pre>${escapeHtml(item.text)}</pre></section>`; }).join("");
     const previous = offset > 0 ? `<a class="button secondary" href="/documents/${documentId}/content?offset=${Math.max(0, offset - 50)}">Previous</a>` : "";
     const next = offset + sections.length < total ? `<a class="button secondary" href="/documents/${documentId}/content?offset=${offset + sections.length}">Next</a>` : "";
     return html(layout(`Content · ${document.filename}`, `<p><a href="/wiki/${encodeURIComponent(store.getById(document.pageId).alias)}">← ${escapeHtml(document.filename)}</a></p><h1>Extracted content</h1><p>${total} sections · showing ${total ? offset + 1 : 0}–${offset + sections.length}</p>${content || "<p>No extracted text.</p>"}<div class="page-actions">${previous}${next}</div>`, csrf), 200, headers);
@@ -490,10 +491,22 @@ function pageView(page: Page, store: PageStore, csrf: string): string {
   <aside><h2>Backlinks</h2>${backlinks ? `<ul>${backlinks}</ul>` : "<p>No pages link here.</p>"}</aside>`;
 }
 
+function locatorDetails(locator: DocumentLocator): string {
+  const parts: string[] = [];
+  if (locator.page !== undefined) parts.push(`page ${locator.page}`);
+  if (locator.slide !== undefined) parts.push(`slide ${locator.slide}`);
+  if (locator.sheet) parts.push(`sheet ${locator.sheet}`);
+  if (locator.range) parts.push(`range ${locator.range}`);
+  if (locator.heading) parts.push(`heading ${locator.heading}`);
+  if (locator.image) parts.push(`image ${locator.image}`);
+  if (locator.part) parts.push(locator.part);
+  return parts.length ? parts.join(" · ") : locator.label;
+}
+
 function documentView(document: ReturnType<PageStore["getDocument"]>, store: PageStore, csrf: string): string {
   const warnings = document.currentVersion.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("");
   const sectionCount = document.status === "ready" ? store.documentSectionCount(document.id) : 0;
-  return `<aside class="document-content"><div class="page-header"><div><h2>Document content</h2><p>${escapeHtml(document.filename)} · ${escapeHtml(document.format.toUpperCase())} · version ${document.currentVersion.version} · <strong>${escapeHtml(document.status)}</strong>${document.needsOcr ? " · OCR pending" : ""}${document.needsReview ? " · needs review" : ""}</p></div><a class="button secondary" href="/documents/${document.id}/download">Download original</a></div>${document.lastError ? `<p class="warning">${escapeHtml(document.lastError)}</p>` : ""}${document.status === "queued" || document.status === "extracting" ? `<form method="post" action="/documents/${document.id}/cancel"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button class="secondary" type="submit">Cancel extraction</button></form>` : ""}${document.status === "failed" || document.status === "cancelled" ? `<form method="post" action="/documents/${document.id}/retry"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button type="submit">Retry extraction</button></form>` : ""}${document.needsReview ? `<form method="post" action="/documents/${document.id}/review"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><p class="notice">Human page fields were preserved during replacement.</p><button type="submit">Mark reviewed</button></form>` : ""}${warnings ? `<ul>${warnings}</ul>` : ""}<form method="post" enctype="multipart/form-data" action="/documents/${document.id}/replace"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Replace with a new version<input type="file" name="file" accept=".docx,.xlsx,.pptx,.pdf,.md,.markdown,.txt" required></label><button type="submit">Queue replacement</button></form>${sectionCount ? `<p><a class="button secondary" href="/documents/${document.id}/content">View extracted text (${sectionCount} sections)</a></p>` : `<p>Extraction is ${escapeHtml(document.status)}.</p>`}</aside>`;
+  return `<aside class="document-content"><div class="page-header"><div><h2>Document content</h2><p>${escapeHtml(document.filename)} · ${escapeHtml(document.format.toUpperCase())} · version ${document.currentVersion.version} · <strong>${escapeHtml(document.status)}</strong> · OCR ${escapeHtml(document.ocrStatus)}${document.needsOcr ? " (pending)" : ""}${document.needsReview ? " · needs review" : ""}</p></div><a class="button secondary" href="/documents/${document.id}/download">Download original</a></div>${document.lastError ? `<p class="warning">${escapeHtml(document.lastError)}</p>` : ""}${document.status === "queued" || document.status === "extracting" ? `<form method="post" action="/documents/${document.id}/cancel"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button class="secondary" type="submit">Cancel extraction</button></form>` : ""}${document.status === "failed" || document.status === "cancelled" || (document.status === "ready" && document.needsOcr) ? `<form method="post" action="/documents/${document.id}/retry"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button type="submit">Retry extraction</button></form>` : ""}${document.needsReview ? `<form method="post" action="/documents/${document.id}/review"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><p class="notice">Human page fields were preserved during replacement.</p><button type="submit">Mark reviewed</button></form>` : ""}${warnings ? `<ul>${warnings}</ul>` : ""}<form method="post" enctype="multipart/form-data" action="/documents/${document.id}/replace"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Replace with a new version<input type="file" name="file" accept=".docx,.xlsx,.pptx,.pdf,.md,.markdown,.txt" required></label><button type="submit">Queue replacement</button></form>${sectionCount ? `<p><a class="button secondary" href="/documents/${document.id}/content">View extracted text (${sectionCount} sections)</a></p>` : `<p>Extraction is ${escapeHtml(document.status)}.</p>`}</aside>`;
 }
 
 function trashPageView(page: DeletedPage, store: PageStore, csrf: string): string {

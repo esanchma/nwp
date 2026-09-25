@@ -24,6 +24,7 @@ import {
   type DocumentStatus,
   type DocumentVersion,
   type DocumentVersionStatus,
+  type OcrStatus,
   type Page,
   type PageInput,
   type PageList,
@@ -81,6 +82,7 @@ interface DocumentRow {
   format: DocumentFormat;
   status: DocumentStatus;
   needs_ocr: number;
+  ocr_status: OcrStatus;
   needs_review: number;
   last_error: string | null;
   managed_title: string;
@@ -100,6 +102,7 @@ interface DocumentVersionRow {
   status: DocumentVersionStatus;
   parser_version: string | null;
   metadata_json: string;
+  ocr_status: OcrStatus;
   warnings_json: string;
   created_at: string;
   extracted_at: string | null;
@@ -379,6 +382,28 @@ const migrations = [
       lease_until TEXT,
       last_error TEXT
     );
+  `,
+  `
+    ALTER TABLE documents ADD COLUMN ocr_status TEXT NOT NULL DEFAULT 'not_required' CHECK (ocr_status IN ('not_required', 'pending', 'completed', 'partial', 'unavailable'));
+    ALTER TABLE document_versions ADD COLUMN ocr_status TEXT NOT NULL DEFAULT 'not_required' CHECK (ocr_status IN ('not_required', 'pending', 'completed', 'partial', 'unavailable'));
+    UPDATE documents SET ocr_status = CASE WHEN needs_ocr = 1 THEN 'pending' ELSE 'not_required' END;
+    UPDATE document_versions SET ocr_status = CASE WHEN id IN (SELECT dv.id FROM document_versions dv JOIN documents d ON d.id = dv.document_id WHERE d.needs_ocr = 1 AND dv.version = (SELECT max(v2.version) FROM document_versions v2 WHERE v2.document_id = dv.document_id)) THEN 'pending' ELSE 'not_required' END;
+    CREATE TABLE document_sections_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_version_id INTEGER NOT NULL REFERENCES document_versions(id) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('heading', 'paragraph', 'table', 'slide', 'notes', 'sheet', 'page', 'image', 'text')),
+      title TEXT,
+      locator_json TEXT NOT NULL,
+      text TEXT NOT NULL,
+      hidden INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
+      needs_ocr INTEGER NOT NULL DEFAULT 0 CHECK (needs_ocr IN (0, 1)),
+      UNIQUE(document_version_id, ordinal)
+    );
+    INSERT INTO document_sections_new SELECT * FROM document_sections;
+    DROP TABLE document_sections;
+    ALTER TABLE document_sections_new RENAME TO document_sections;
+    CREATE INDEX document_sections_version_idx ON document_sections(document_version_id, ordinal);
   `,
 ];
 
@@ -847,7 +872,7 @@ export class PageStore {
         const nextVersion = current.currentVersion.version + 1;
         this.db.run("UPDATE document_versions SET status = 'superseded' WHERE document_id = ? AND status IN ('queued', 'extracting')", [documentId]);
         const version = this.db.run("INSERT INTO document_versions(document_id, version, blob_sha256, status, created_at) VALUES (?, ?, ?, 'queued', ?)", [documentId, nextVersion, sha256, now]);
-        this.db.run("UPDATE documents SET filename = ?, mime_type = ?, format = ?, status = 'queued', needs_ocr = 0, needs_review = ?, last_error = NULL, updated_at = ? WHERE id = ?", [filename, mimeType, format, humanEdited ? 1 : managed.needs_review, now, documentId]);
+        this.db.run("UPDATE documents SET filename = ?, mime_type = ?, format = ?, status = 'queued', needs_ocr = 0, ocr_status = 'not_required', needs_review = ?, last_error = NULL, updated_at = ? WHERE id = ?", [filename, mimeType, format, humanEdited ? 1 : managed.needs_review, now, documentId]);
         this.db.run("INSERT INTO document_jobs(document_id, version_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, ?, 0, 1) ON CONFLICT(document_id) DO UPDATE SET version_id = excluded.version_id, requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = document_jobs.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [documentId, Number(version.lastInsertRowid), now, now]);
       }).immediate();
       return this.getDocument(documentId);
@@ -929,8 +954,8 @@ export class PageStore {
       this.db.run("DELETE FROM document_sections WHERE document_version_id = ?", [task.versionId]);
       const insert = this.db.query("INSERT INTO document_sections(document_version_id, ordinal, kind, title, locator_json, text, hidden, needs_ocr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
       extraction.sections.forEach((item, index) => insert.run(task.versionId, index, item.kind, item.title, JSON.stringify(item.locator), item.text, item.hidden ? 1 : 0, item.needsOcr ? 1 : 0));
-      this.db.run("UPDATE document_versions SET status = 'ready', parser_version = ?, metadata_json = ?, warnings_json = ?, extracted_at = ? WHERE id = ?", [parserVersion, JSON.stringify(extraction.metadata), JSON.stringify(extraction.warnings), now, task.versionId]);
-      this.db.run("UPDATE documents SET status = 'ready', needs_ocr = ?, last_error = NULL, updated_at = ? WHERE id = ?", [extraction.needsOcr ? 1 : 0, now, task.documentId]);
+      this.db.run("UPDATE document_versions SET status = 'ready', parser_version = ?, metadata_json = ?, ocr_status = ?, warnings_json = ?, extracted_at = ? WHERE id = ?", [parserVersion, JSON.stringify(extraction.metadata), extraction.ocrStatus, JSON.stringify(extraction.warnings), now, task.versionId]);
+      this.db.run("UPDATE documents SET status = 'ready', needs_ocr = ?, ocr_status = ?, last_error = NULL, updated_at = ? WHERE id = ?", [extraction.needsOcr ? 1 : 0, extraction.ocrStatus, now, task.documentId]);
       this.db.run("DELETE FROM document_jobs WHERE document_id = ? AND revision = ?", [task.documentId, task.revision]);
     }).immediate();
   }
@@ -961,12 +986,12 @@ export class PageStore {
 
   retryDocument(documentId: number): DocumentRecord {
     const document = this.getDocument(documentId);
-    if (document.status !== "failed" && document.status !== "cancelled") throw new AppError("document_not_retryable", "only failed or cancelled extraction can be retried", 409);
+    if (document.status !== "failed" && document.status !== "cancelled" && !(document.status === "ready" && document.needsOcr)) throw new AppError("document_not_retryable", "only failed, cancelled, or OCR-pending extraction can be retried", 409);
     const now = new Date().toISOString();
     this.db.transaction(() => {
       this.db.run("INSERT INTO document_jobs(document_id, version_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, ?, 0, 1) ON CONFLICT(document_id) DO UPDATE SET version_id = excluded.version_id, requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = document_jobs.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [documentId, document.currentVersion.id, now, now]);
-      this.db.run("UPDATE documents SET status = 'queued', last_error = NULL, updated_at = ? WHERE id = ?", [now, documentId]);
-      this.db.run("UPDATE document_versions SET status = 'queued' WHERE id = ?", [document.currentVersion.id]);
+      this.db.run("UPDATE documents SET status = 'queued', ocr_status = CASE WHEN needs_ocr = 1 THEN 'pending' ELSE ocr_status END, last_error = NULL, updated_at = ? WHERE id = ?", [now, documentId]);
+      this.db.run("UPDATE document_versions SET status = 'queued', ocr_status = ? WHERE id = ?", [document.needsOcr ? "pending" : document.currentVersion.ocrStatus, document.currentVersion.id]);
     }).immediate();
     return this.getDocument(documentId);
   }
@@ -986,7 +1011,7 @@ export class PageStore {
   private hydrateDocument(row: DocumentRow): DocumentRecord {
     const version = this.db.query<DocumentVersionRow, [number]>(documentVersionSelect("dv.document_id = ?") + " ORDER BY dv.version DESC LIMIT 1").get(row.id);
     if (!version) throw new Error(`document ${row.id} has no version`);
-    return { id: row.id, pageId: row.page_id, filename: row.filename, mimeType: row.mime_type, format: row.format, status: row.status, needsOcr: row.needs_ocr === 1, needsReview: row.needs_review === 1, lastError: row.last_error, createdAt: row.created_at, updatedAt: row.updated_at, currentVersion: toDocumentVersion(version) };
+    return { id: row.id, pageId: row.page_id, filename: row.filename, mimeType: row.mime_type, format: row.format, status: row.status, needsOcr: row.needs_ocr === 1, ocrStatus: row.ocr_status, needsReview: row.needs_review === 1, lastError: row.last_error, createdAt: row.created_at, updatedAt: row.updated_at, currentVersion: toDocumentVersion(version) };
   }
 
   private ensureBlob(bytes: Uint8Array, mimeType: string, now: string): string {
@@ -1341,7 +1366,7 @@ export class PageStore {
 }
 
 function documentVersionSelect(where: string): string {
-  return `SELECT dv.id, dv.document_id, dv.version, dv.blob_sha256, b.size, dv.status, dv.parser_version, dv.metadata_json, dv.warnings_json, dv.created_at, dv.extracted_at
+  return `SELECT dv.id, dv.document_id, dv.version, dv.blob_sha256, b.size, dv.status, dv.parser_version, dv.metadata_json, dv.ocr_status, dv.warnings_json, dv.created_at, dv.extracted_at
     FROM document_versions dv JOIN attachment_blobs b ON b.sha256 = dv.blob_sha256 WHERE ${where}`;
 }
 
@@ -1350,7 +1375,7 @@ function toDocumentVersion(row: DocumentVersionRow): DocumentVersion {
   let metadata: unknown = {};
   try { warnings = JSON.parse(row.warnings_json); } catch { warnings = []; }
   try { metadata = JSON.parse(row.metadata_json); } catch { metadata = {}; }
-  return { id: row.id, documentId: row.document_id, version: row.version, sha256: row.blob_sha256, size: row.size, status: row.status, parserVersion: row.parser_version, metadata: metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata as Record<string, string | number | boolean | null> : {}, warnings: Array.isArray(warnings) ? warnings.filter((item): item is string => typeof item === "string") : [], createdAt: row.created_at, extractedAt: row.extracted_at };
+  return { id: row.id, documentId: row.document_id, version: row.version, sha256: row.blob_sha256, size: row.size, status: row.status, parserVersion: row.parser_version, metadata: metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata as Record<string, string | number | boolean | null> : {}, ocrStatus: row.ocr_status, warnings: Array.isArray(warnings) ? warnings.filter((item): item is string => typeof item === "string") : [], createdAt: row.created_at, extractedAt: row.extracted_at };
 }
 
 function attachmentSelect(where: string): string {

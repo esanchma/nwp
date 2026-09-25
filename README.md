@@ -2,11 +2,11 @@
 
 nwp (nano-wiki-pi) is a small local wiki for people and development agents. It provides a server-rendered web interface, a CLI, and MCP tools over one SQLite database.
 
-nwp supports page creation, reading, listing, editing, full-text search, revision history, restoration, a recoverable trash, deduplicated file attachments, publication states, custom properties, parent-child navigation, and portable import/export. Pages use GitHub Flavored Markdown, `[[wiki-links]]`, backlinks, and tags. nwp stores a complete snapshot before each meaningful edit.
+nwp supports page creation, reading, listing, editing, hybrid full-text and semantic search, durable document extraction with local OCR, revision history, restoration, a recoverable trash, deduplicated file attachments, publication states, custom properties, parent-child navigation, and portable import/export. Pages use GitHub Flavored Markdown, `[[wiki-links]]`, backlinks, and tags. nwp stores a complete snapshot before each meaningful edit.
 
 ## Requirements
 
-Building requires Bun 1.4 or newer on Linux x86-64. The compiled executable does not require Bun at runtime.
+Building requires Bun 1.4 or newer on Linux x86-64. The compiled executable does not require Bun at runtime. Document OCR is optional and uses local `tesseract` plus the `spa` and `eng` language packs. OCR of scanned PDF pages also requires `pdftoppm` from Poppler. Ingestion remains available when these programs are absent.
 
 ## Build and test
 
@@ -62,6 +62,13 @@ max_archive_entries = 100000
 max_compression_ratio = 1000
 max_pdf_pages = 10000
 max_spreadsheet_cells = 5000000
+ocr_enabled = true
+tesseract_command = "tesseract"
+pdf_renderer_command = "pdftoppm"
+ocr_languages = ["spa", "eng"]
+ocr_timeout_seconds = 120
+max_ocr_items = 10000
+max_ocr_output_characters = 1000000
 ```
 
 The server also accepts `--host`, `--port`, `--data-dir`, and `--config`. Command-line values override the configuration file.
@@ -113,6 +120,7 @@ Page commands connect to the running local server and read the generated token a
 ./dist/nwp tag list
 ./dist/nwp document import ./handbook.docx
 ./dist/nwp document list
+./dist/nwp document ocr-status
 ./dist/nwp document get 1
 ./dist/nwp document replace 1 ./handbook-v2.docx
 ./dist/nwp document review 1
@@ -151,6 +159,7 @@ Available operations:
 - `GET|POST /api/v1/tags/definitions`
 - `GET /api/v1/semantic/status`
 - `GET|POST /api/v1/documents`
+- `GET /api/v1/documents/ocr/status`
 - `GET /api/v1/documents/:id`
 - `GET|POST /api/v1/documents/:id/versions`
 - `GET /api/v1/documents/:id/content`
@@ -210,6 +219,7 @@ Tools:
 - `define_tag`
 - `semantic_index_status`
 - `list_documents`
+- `document_ocr_status`
 - `get_document`
 - `get_document_content`
 - `get_document_upload_instructions`
@@ -273,9 +283,11 @@ MCP exposes metadata and local URLs. Binary upload and download use the authenti
 
 Import DOCX, XLSX, PPTX, PDF, Markdown, and TXT from `/documents`, REST, or the CLI. Each document receives a linked wiki page and content-addressed original storage. Extraction runs in the durable worker and produces source-aware sections: Word headings and tables, PowerPoint slides and speaker notes, Excel sheet/range blocks, PDF pages, and Markdown headings. Hidden slides and sheets are retained and marked.
 
-The page displays extracted text virtually rather than duplicating it in Markdown. Replacements are explicit by document ID, retain earlier versions, preserve human page edits, and set `needsReview` when managed fields diverge. Embedded images and low-text PDF pages are marked for the upcoming OCR delivery.
+The page displays extracted text virtually rather than duplicating it in Markdown. Replacements are explicit by document ID, retain earlier versions, preserve human page edits, and set `needsReview` when managed fields diverge.
 
-Office archives are parsed without executing macros, formulas, or external connections. Configurable technical guards constrain archive expansion, compression ratio, entry count, XML depth, PDF pages, spreadsheet cells, and upload memory. Run extraction with `nwp worker`, `nwp serve --with-worker`, or the one-shot `nwp document run`.
+When enabled, the worker runs local Tesseract OCR with Spanish and English data. It extracts text from DOCX and PPTX images, renders low-text PDF pages through `pdftoppm`, and stores image or page locators with each OCR section. OCR state is `pending`, `completed`, `partial`, or `unavailable`; a missing executable or language pack does not fail native extraction. Install the missing capability and run `nwp document retry ID` to reprocess an OCR-pending document. Use `nwp document ocr-status` to diagnose the runtime.
+
+Office archives are parsed without executing macros, formulas, or external connections. Configurable technical guards constrain archive expansion, compression ratio, entry count, XML depth, PDF pages, spreadsheet cells, upload memory, OCR item counts, subprocess time, and OCR output. Run extraction with `nwp worker`, `nwp serve --with-worker`, or the one-shot `nwp document run`.
 
 ## Trash
 

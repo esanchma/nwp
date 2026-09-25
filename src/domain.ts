@@ -150,7 +150,8 @@ export interface TagDefinition {
 export type DocumentFormat = "docx" | "xlsx" | "pptx" | "pdf" | "markdown" | "text";
 export type DocumentStatus = "queued" | "extracting" | "ready" | "failed" | "cancelled";
 export type DocumentVersionStatus = DocumentStatus | "superseded";
-export type DocumentSectionKind = "heading" | "paragraph" | "table" | "slide" | "notes" | "sheet" | "page" | "text";
+export type DocumentSectionKind = "heading" | "paragraph" | "table" | "slide" | "notes" | "sheet" | "page" | "image" | "text";
+export type OcrStatus = "not_required" | "pending" | "completed" | "partial" | "unavailable";
 
 export interface DocumentLocator {
   label: string;
@@ -159,6 +160,7 @@ export interface DocumentLocator {
   sheet?: string;
   range?: string;
   heading?: string;
+  image?: string;
   part?: string;
 }
 
@@ -183,6 +185,7 @@ export interface DocumentVersion {
   status: DocumentVersionStatus;
   parserVersion: string | null;
   metadata: Record<string, string | number | boolean | null>;
+  ocrStatus: OcrStatus;
   warnings: string[];
   createdAt: string;
   extractedAt: string | null;
@@ -196,6 +199,7 @@ export interface DocumentRecord {
   format: DocumentFormat;
   status: DocumentStatus;
   needsOcr: boolean;
+  ocrStatus: OcrStatus;
   needsReview: boolean;
   lastError: string | null;
   createdAt: string;

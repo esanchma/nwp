@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { strToU8, zipSync } from "fflate";
 import type { DocumentRagConfig } from "../src/config.ts";
 import { PageStore } from "../src/database.ts";
 import { canonicalDocumentMime, documentFormat, DocumentWorker, extractDocument } from "../src/documents.ts";
 
-const config: DocumentRagConfig = { enabled: true, maxFileBytes: 10_000_000, maxExpandedBytes: 50_000_000, maxArchiveEntries: 10_000, maxCompressionRatio: 1000, maxPdfPages: 10_000, maxSpreadsheetCells: 5_000_000 };
+const config: DocumentRagConfig = { enabled: true, maxFileBytes: 10_000_000, maxExpandedBytes: 50_000_000, maxArchiveEntries: 10_000, maxCompressionRatio: 1000, maxPdfPages: 10_000, maxSpreadsheetCells: 5_000_000, ocrEnabled: false, tesseractCommand: "tesseract", pdfRendererCommand: "pdftoppm", ocrLanguages: ["spa", "eng"], ocrTimeoutSeconds: 120, maxOcrItems: 10_000, maxOcrOutputCharacters: 1_000_000 };
 let dir = "";
 let store: PageStore | null = null;
 
@@ -89,6 +89,76 @@ describe("document extraction", () => {
 });
 
 describe("document storage and jobs", () => {
+  test("migrates the 0.10 document schema to OCR status and image sections", async () => {
+    const db = await setup();
+    const path = join(dir, "nwp.db");
+    db.db.run("ALTER TABLE documents DROP COLUMN ocr_status");
+    db.db.run("ALTER TABLE document_versions DROP COLUMN ocr_status");
+    db.db.run("DROP TABLE document_sections");
+    db.db.run(`CREATE TABLE document_sections (id INTEGER PRIMARY KEY AUTOINCREMENT, document_version_id INTEGER NOT NULL REFERENCES document_versions(id) ON DELETE CASCADE, ordinal INTEGER NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('heading', 'paragraph', 'table', 'slide', 'notes', 'sheet', 'page', 'text')), title TEXT, locator_json TEXT NOT NULL, text TEXT NOT NULL, hidden INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)), needs_ocr INTEGER NOT NULL DEFAULT 0 CHECK (needs_ocr IN (0, 1)), UNIQUE(document_version_id, ordinal))`);
+    db.db.run("CREATE INDEX document_sections_version_idx ON document_sections(document_version_id, ordinal)");
+    db.db.run("PRAGMA user_version = 8");
+    db.close();
+    store = new PageStore(path);
+    const columns = store.db.query<{ name: string }, []>("PRAGMA table_info(documents)").all().map(({ name }) => name);
+    expect(columns).toContain("ocr_status");
+    expect(store.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(9);
+  });
+
+  test("runs local OCR through Tesseract and stores image citations", async () => {
+    const db = await setup();
+    const tesseract = join(dir, "mock-tesseract");
+    await writeFile(tesseract, `#!/bin/sh\nif [ "$1" = "--list-langs" ]; then printf 'eng\\nspa\\n'; else printf 'Recognized invoice total 42'; fi\n`);
+    await chmod(tesseract, 0o700);
+    const bytes = officeZip({
+      "word/document.xml": `<w:document xmlns:w="w"><w:body><w:p><w:r><w:t>Invoice</w:t></w:r></w:p></w:body></w:document>`,
+      "word/media/invoice.png": "image bytes",
+    });
+    const document = db.createDocument("invoice.docx", canonicalDocumentMime("docx"), "docx", bytes, "cli", config.maxFileBytes);
+    const renderer = join(dir, "mock-pdftoppm");
+    await writeFile(renderer, `#!/bin/sh\nfor arg do last="$arg"; done\nprintf image > "$last.png"\n`);
+    await chmod(renderer, 0o700);
+    const ocrConfig = { ...config, ocrEnabled: true, tesseractCommand: tesseract, pdfRendererCommand: renderer };
+    expect(await new DocumentWorker(db, ocrConfig).runUntilIdle()).toBe(1);
+    expect(db.getDocument(document.id)).toMatchObject({ needsOcr: false, ocrStatus: "completed", currentVersion: { ocrStatus: "completed" } });
+    expect(db.documentSections(document.id).find(({ kind }) => kind === "image")).toMatchObject({ text: "Recognized invoice total 42", locator: { image: "invoice.png" } });
+
+    const pdf = db.createDocument("scan.pdf", "application/pdf", "pdf", minimalPdf("Scan"), "cli", config.maxFileBytes);
+    expect(await new DocumentWorker(db, ocrConfig).runUntilIdle()).toBe(1);
+    expect(db.getDocument(pdf.id).ocrStatus).toBe("completed");
+    expect(db.documentSections(pdf.id)[0]).toMatchObject({ needsOcr: false, locator: { page: 1, part: "OCR" } });
+    expect(db.documentSections(pdf.id)[0]!.text).toContain("Recognized invoice total 42");
+  });
+
+  test("retries a transient OCR subprocess failure", async () => {
+    const db = await setup();
+    const tesseract = join(dir, "flaky-tesseract");
+    const marker = join(dir, "ocr-attempted");
+    await writeFile(tesseract, `#!/bin/sh\nif [ "$1" = "--list-langs" ]; then printf 'eng\\nspa\\n'; elif [ ! -f '${marker}' ]; then touch '${marker}'; exit 1; else printf 'Recovered OCR text'; fi\n`);
+    await chmod(tesseract, 0o700);
+    const bytes = officeZip({ "word/document.xml": `<w:document xmlns:w="w"><w:body/></w:document>`, "word/media/scan.png": "image" });
+    const document = db.createDocument("scan.docx", canonicalDocumentMime("docx"), "docx", bytes, "cli", config.maxFileBytes);
+    await new DocumentWorker(db, { ...config, ocrEnabled: true, tesseractCommand: tesseract }).runUntilIdle();
+    expect(db.getDocument(document.id).ocrStatus).toBe("completed");
+    expect(db.documentSections(document.id).find(({ kind }) => kind === "image")!.text).toBe("Recovered OCR text");
+  });
+
+  test("degrades safely when Tesseract is unavailable", async () => {
+    const db = await setup();
+    const bytes = officeZip({ "word/document.xml": `<w:document xmlns:w="w"><w:body/></w:document>`, "word/media/scan.png": "image" });
+    const document = db.createDocument("scan.docx", canonicalDocumentMime("docx"), "docx", bytes, "cli", config.maxFileBytes);
+    await new DocumentWorker(db, { ...config, ocrEnabled: true, tesseractCommand: join(dir, "missing-tesseract") }).runUntilIdle();
+    const result = db.getDocument(document.id);
+    expect(result).toMatchObject({ status: "ready", needsOcr: true, ocrStatus: "unavailable", currentVersion: { ocrStatus: "unavailable" } });
+    expect(result.currentVersion.warnings.join(" ")).toContain("Tesseract is unavailable");
+    const tesseract = join(dir, "installed-tesseract");
+    await writeFile(tesseract, `#!/bin/sh\nif [ "$1" = "--list-langs" ]; then printf 'eng\\nspa\\n'; else printf 'OCR after install'; fi\n`);
+    await chmod(tesseract, 0o700);
+    expect(db.retryDocument(document.id).ocrStatus).toBe("pending");
+    await new DocumentWorker(db, { ...config, ocrEnabled: true, tesseractCommand: tesseract }).runUntilIdle();
+    expect(db.getDocument(document.id)).toMatchObject({ needsOcr: false, ocrStatus: "completed" });
+  });
+
   test("creates a linked page, extracts durable sections, and replaces explicitly", async () => {
     const db = await setup();
     const first = strToU8("first document body");

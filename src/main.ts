@@ -31,7 +31,7 @@ async function main(argv: string[]): Promise<void> {
   if (command === "worker") return workerCommand(argv.slice(1));
   if (command === "index") return indexCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") return printHelp();
-  if (command === "--version" || command === "-v") return console.log("nwp 0.10.0");
+  if (command === "--version" || command === "-v") return console.log("nwp 0.11.0");
   throw new Error(`unknown command '${command}'. Run 'nwp help'.`);
 }
 
@@ -92,7 +92,7 @@ async function documentCommand(argv: string[]): Promise<void> {
   }
   const token = optionalString(options, "token") ?? await readApiToken(config);
   const endpoint = optionalString(options, "endpoint") ?? `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${config.port}`;
-  if (action === "list") return printResult(await apiRequest(endpoint, token, "/api/v1/documents", "GET"), true);
+  if (action === "list" || action === "ocr-status") return printResult(await apiRequest(endpoint, token, action === "list" ? "/api/v1/documents" : "/api/v1/documents/ocr/status", "GET"), true);
   if (action === "get" || action === "review" || action === "cancel" || action === "retry") {
     const id = integerArgument(options, 0, `document ${action} requires a document ID`);
     const suffix = action === "get" ? "" : `/${action}`;
@@ -112,7 +112,7 @@ async function documentCommand(argv: string[]): Promise<void> {
     if (!response.ok) throw new Error(result.error?.message ?? `API returned ${response.status}`);
     return printResult(result, true);
   }
-  throw new Error("document command must be import, replace, list, get, review, cancel, retry, or run");
+  throw new Error("document command must be import, replace, list, get, review, cancel, retry, ocr-status, or run");
 }
 
 async function tagCommand(argv: string[]): Promise<void> {
@@ -540,6 +540,7 @@ Usage:
   nwp document import PATH
   nwp document replace ID PATH
   nwp document list
+  nwp document ocr-status
   nwp document get ID
   nwp document review|cancel|retry ID
   nwp document run [--json]

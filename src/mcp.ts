@@ -1,16 +1,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
-import type { SemanticSearchConfig } from "./config.ts";
+import type { DocumentRagConfig, SemanticSearchConfig } from "./config.ts";
 import type { PageStore } from "./database.ts";
 import { compareRevision } from "./history.ts";
 import type { Attachment } from "./domain.ts";
 import { exportPageMarkdown, importPageMarkdown } from "./transfer.ts";
 import { hybridSearch, OllamaEmbedder } from "./semantic.ts";
+import { ocrRuntimeStatus } from "./documents.ts";
 
-export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSearchConfig): (request: Request) => Promise<Response> {
+export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig): (request: Request) => Promise<Response> {
   return async (request) => {
-    const server = createServer(store, semanticConfig);
+    const server = createServer(store, semanticConfig, documentConfig);
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
@@ -21,9 +22,9 @@ export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSear
   };
 }
 
-function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig): McpServer {
+function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig): McpServer {
   const embedder = semanticConfig?.enabled ? new OllamaEmbedder(semanticConfig) : null;
-  const server = new McpServer({ name: "nwp", version: "0.10.0" });
+  const server = new McpServer({ name: "nwp", version: "0.11.0" });
   const statusSchema = z.enum(["draft", "published", "archived"]);
   const statusFilterSchema = z.enum(["draft", "published", "archived", "all"]);
   const propertiesSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]));
@@ -118,6 +119,12 @@ function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig): 
     "semantic_index_status",
     { description: "Get semantic indexing availability and queue status", inputSchema: {}, annotations: { readOnlyHint: true } },
     async () => toolResult(store.semanticStatus(semanticConfig?.enabled ?? false, semanticConfig?.embeddingModel ?? "", semanticConfig?.embeddingDimensions ?? 0)),
+  );
+
+  server.registerTool(
+    "document_ocr_status",
+    { description: "Check local Tesseract languages and PDF renderer availability", inputSchema: {}, annotations: { readOnlyHint: true } },
+    async () => toolResult(documentConfig ? await ocrRuntimeStatus(documentConfig) : { enabled: false, available: false, pdfRendererAvailable: false }),
   );
 
   server.registerTool(
