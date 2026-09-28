@@ -62,7 +62,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.16.0" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.17.0" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });
@@ -333,6 +333,36 @@ describe("web", () => {
     expect(body).toContain("Home");
     expect(body).toContain('class="wikilink missing"');
     expect(body).toContain("start");
+  });
+
+  test("provides a sanitized side-by-side Markdown editor preview", async () => {
+    store.create({ title: "Target", body: "", tags: [] }, "web");
+    store.create({ title: "Editor", body: "# Existing\n\n[[target]]", tags: [] }, "web");
+    const edit = await handler(request("/wiki/editor/edit"));
+    const cookie = edit.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const csrf = /nwp_csrf=([^;]+)/.exec(cookie)![1]!;
+    const body = await edit.text();
+    expect(body).toContain("data-markdown-editor");
+    expect(body).toContain('id="markdown-preview"');
+    expect(body).toContain("<h1>Existing</h1>");
+    expect(body).toContain('href="/wiki/target"');
+    expect(body).toContain('src="/editor.js"');
+    expect(edit.headers.get("content-security-policy")).toContain("script-src 'self'");
+
+    const preview = await handler(request("/preview", {
+      method: "POST",
+      headers: { Cookie: cookie },
+      body: new URLSearchParams({ csrf, body: "## Live\n\n[[missing]]\n\n<script>alert(1)</script>" }),
+    }));
+    const rendered = await preview.text();
+    expect(preview.status).toBe(200);
+    expect(rendered).toContain("<h2>Live</h2>");
+    expect(rendered).not.toContain("<script>");
+    expect(rendered).toContain('class="wikilink missing"');
+
+    const script = await handler(request("/editor.js"));
+    expect(script.headers.get("content-type")).toContain("text/javascript");
+    expect(await script.text()).toContain("Preview up to date");
   });
 
   test("renders search results", async () => {

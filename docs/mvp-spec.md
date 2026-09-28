@@ -77,7 +77,7 @@ Required views:
 - `/tags`: tag index;
 - `/tags/:tag`: pages with one tag.
 
-The editor is a plain textarea. Preview and side-by-side editing are deferred.
+The editor uses a plain textarea with a progressively enhanced, side-by-side sanitized preview. Without JavaScript, editing, submission, and the initial server-rendered preview remain available.
 
 The UI must provide:
 
@@ -248,13 +248,14 @@ Version 0.15 adds manual and scheduled conditional recapture with `ETag` and `La
 
 Version 0.16 adds exact complete-archive recovery. Export format 2 includes an integrity-protected SQLite snapshot alongside inspectable logical metadata and content-addressed blobs. Backup verification enforces path, type, count, expansion, size, SHA-256, SQLite integrity, foreign-key, and referenced-blob checks. Dry runs build disposable restored instances; real restores require the instance lock, create an automatic pre-restore archive, preserve the API token, and atomically swap a validated staging directory with rollback on failure. CLI commands cover create, list, verify, and restore. A hardened systemd user service manages the server and workers, while MCP health and statistics tools expose database and durable-queue state.
 
+Version 0.17 adds a responsive side-by-side Markdown editor and preview for page creation and editing. Initial preview remains server-rendered without JavaScript; a small same-origin script progressively adds debounced live updates through a CSRF-protected endpoint, wiki-link resolution, formatting controls, character count, unsaved-change protection, and Ctrl/Command+S. Preview output uses the same GFM renderer and HTML sanitizer as saved pages under a restrictive Content Security Policy.
+
 ## Roadmap
 
 The following decisions describe the remaining product vision and do not expand the original MVP scope. Work proceeds in the priority order shown: user experience first, then portability, then operations.
 
 ### Priority 1: content and navigation
 
-- advanced preview and side-by-side editing;
 - richer navigation beyond the page tree and breadcrumbs.
 
 ### Priority 2: files and portability

@@ -71,7 +71,7 @@ timeout_seconds = 30
 max_redirects = 5
 max_response_bytes = 20971520
 max_extracted_characters = 2000000
-user_agent = "nwp/0.16 (+local knowledge capture)"
+user_agent = "nwp/0.17 (+local knowledge capture)"
 
 [research]
 enabled = true
@@ -104,7 +104,7 @@ The default loopback address is part of nwp's security boundary. Exposing nwp on
 
 ## Web interface
 
-The home page lists recently modified pages. Use **New page** to enter a title, optional alias, comma-separated tags, and Markdown.
+The home page lists recently modified pages. Use **New page** to enter a title, optional alias, comma-separated tags, and Markdown. Creation and editing provide a responsive side-by-side Markdown editor and sanitized server-rendered preview. The preview updates after a short pause, understands current wiki-link state, includes a compact formatting toolbar and character count, warns about unsaved changes, and supports Ctrl/⌘+S. The form and its initial preview still work when JavaScript is unavailable.
 
 Link to another page with its alias:
 
