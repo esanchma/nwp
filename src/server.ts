@@ -5,13 +5,13 @@ import swaggerUiBundle from "swagger-ui-dist/swagger-ui-bundle.js" with { type: 
 import swaggerUiCss from "swagger-ui-dist/swagger-ui.css" with { type: "text" };
 import type { Config } from "./config.ts";
 import type { PageStore } from "./database.ts";
-import { AppError, type Attachment, type ChangeSource, type DeletedPage, type DocumentLocator, type Page, type PageProperties, type PageStatus, type PageSummary, type RevisionList } from "./domain.ts";
+import { AppError, type Attachment, type ChangeSource, type DeletedPage, type DocumentLocator, type DocumentSearchFilters, type Page, type PageProperties, type PageStatus, type PageSummary, type RevisionList, type SearchResults } from "./domain.ts";
 import { compareRevision, type PageDiff } from "./history.ts";
 import { escapeHtml, renderMarkdown } from "./markdown.ts";
 import { createMcpHandler } from "./mcp.ts";
 import { openApiJson } from "./openapi.ts";
 import { createFullExport, exportPageMarkdown, importPageMarkdown } from "./transfer.ts";
-import { hybridSearch, OllamaEmbedder } from "./semantic.ts";
+import { hybridSearch, lexicalSearch, OllamaEmbedder } from "./semantic.ts";
 import { canonicalDocumentMime, documentFormat, ocrRuntimeStatus } from "./documents.ts";
 
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024 + 64 * 1024;
@@ -182,7 +182,7 @@ async function apiRoute(request: Request, url: URL, store: PageStore, config: Co
     const tags = (url.searchParams.get("tags") ?? "").split(",").filter(Boolean);
     const status = statusParam(url.searchParams.get("status"), "published");
     const properties = parsePropertiesInput(url.searchParams.get("properties") ?? "{}");
-    return json(await searchWithFallback(store, embedder, url.searchParams.get("mode"), url.searchParams.get("q") ?? "", tags, url.searchParams.get("cursor"), limit, status, properties, request.signal));
+    return json(await searchWithFallback(store, embedder, url.searchParams.get("mode"), url.searchParams.get("q") ?? "", tags, url.searchParams.get("cursor"), limit, status, properties, documentSearchFilters(url.searchParams), request.signal));
   }
   if (request.method === "GET" && url.pathname === "/api/v1/tree") {
     return json({ pages: store.tree(statusParam(url.searchParams.get("status"), "published")) });
@@ -238,8 +238,10 @@ async function webRoute(request: Request, url: URL, store: PageStore, config: Co
     const propertiesText = url.searchParams.get("properties") ?? "";
     const properties = propertiesText.trim() ? parsePropertiesInput(propertiesText) : {};
     const mode = url.searchParams.get("mode") === "lexical" ? "lexical" : "hybrid";
-    const results = query.trim() || tags.length || Object.keys(properties).length ? await searchWithFallback(store, embedder, mode, query, tags, url.searchParams.get("cursor"), 20, status, properties, request.signal) : null;
-    return html(layout("Search", searchView(query, tagsText, status, propertiesText, mode, results), csrf), 200, headers);
+    const documentFilters = documentSearchFilters(url.searchParams);
+    const hasFilters = documentFilters.source !== "all" || Object.keys(documentFilters).length > 1;
+    const results = query.trim() || tags.length || Object.keys(properties).length || hasFilters ? await searchWithFallback(store, embedder, mode, query, tags, url.searchParams.get("cursor"), 20, status, properties, documentFilters, request.signal) : null;
+    return html(layout("Search", searchView(query, tagsText, status, propertiesText, mode, documentFilters, results), csrf), 200, headers);
   }
   if (request.method === "GET" && url.pathname === "/tree") {
     const status = statusParam(url.searchParams.get("status"), "published");
@@ -550,22 +552,36 @@ function pageList(title: string, pages: PageSummary[], empty: string): string {
   return `<h1>${title}</h1>${items ? `<ul class="page-list">${items}</ul>` : `<p>${empty}</p>`}`;
 }
 
-function searchView(query: string, tags: string, status: PageStatus | "all", properties: string, mode: "hybrid" | "lexical", results: ReturnType<PageStore["search"]> | null): string {
+function searchView(query: string, tags: string, status: PageStatus | "all", properties: string, mode: "hybrid" | "lexical", filters: DocumentSearchFilters, results: SearchResults | null): string {
+  const option = (value: string, label: string, selected: string | undefined) => `<option value="${value}"${value === (selected ?? "") ? " selected" : ""}>${label}</option>`;
   const form = `<h1>Search</h1><form class="search-page" method="get" action="/search">
     <label>Text<input type="search" name="q" value="${escapeHtml(query)}" autofocus></label>
+    <label>Source<select name="source">${option("all", "Pages and documents", filters.source)}${option("pages", "Pages", filters.source)}${option("documents", "Documents", filters.source)}</select></label>
     <label>Tags <small>comma-separated; all must match</small><input name="tags" value="${escapeHtml(tags)}"></label>
     <label>Status<select name="status">${statusOptions(status, true)}</select></label>
     <label>Mode<select name="mode"><option value="hybrid"${mode === "hybrid" ? " selected" : ""}>Hybrid</option><option value="lexical"${mode === "lexical" ? " selected" : ""}>Lexical</option></select></label>
+    <label>Format<select name="format">${option("", "Any", filters.format)}${["docx", "xlsx", "pptx", "pdf", "markdown", "text"].map((value) => option(value, value.toUpperCase(), filters.format)).join("")}</select></label>
+    <label>Section<select name="kind">${option("", "Any", filters.kind)}${["heading", "paragraph", "table", "slide", "notes", "sheet", "page", "image", "text"].map((value) => option(value, value, filters.kind)).join("")}</select></label>
+    <label>OCR<select name="ocr_status">${option("", "Any", filters.ocrStatus)}${["not_required", "pending", "completed", "partial", "unavailable"].map((value) => option(value, value, filters.ocrStatus)).join("")}</select></label>
+    <label>Visibility<select name="hidden">${option("", "Visible and hidden", filters.hidden === undefined ? "" : String(filters.hidden))}${option("false", "Visible", filters.hidden === undefined ? "" : String(filters.hidden))}${option("true", "Hidden", filters.hidden === undefined ? "" : String(filters.hidden))}</select></label>
+    <label>Document ID<input type="number" min="1" name="document_id" value="${filters.documentId ?? ""}"></label>
+    <label>Version<input type="number" min="1" name="version" value="${filters.version ?? ""}"></label>
+    <label>Updated after<input type="date" name="updated_after" value="${escapeHtml(filters.updatedAfter?.slice(0, 10) ?? "")}"></label>
+    <label>Updated before<input type="date" name="updated_before" value="${escapeHtml(filters.updatedBefore?.slice(0, 10) ?? "")}"></label>
     <label>Properties <small>JSON object, exact values</small><input name="properties" value="${escapeHtml(properties)}" placeholder='{"owner":"team"}'></label>
     <button type="submit">Search</button>
   </form>`;
-  if (!results) return `${form}<p>Enter text, tags, or both.</p>`;
-  const items = results.pages.map((page) => `<li><a href="/wiki/${encodeURIComponent(page.alias)}">${escapeHtml(page.title)}</a><small>${escapeHtml(page.alias)} · ${formatDate(page.updatedAt)}</small>${page.excerpt ? `<p>${escapeHtml(page.excerpt)}</p>` : ""}</li>`).join("");
-  const next = results.nextCursor
-    ? `<p><a class="button secondary" href="/search?${new URLSearchParams({ q: query, tags, status, mode, properties, cursor: results.nextCursor }).toString()}">More results</a></p>`
-    : "";
+  if (!results) return `${form}<p>Enter text or filters.</p>`;
+  const items = (results.hits ?? results.pages.map((page) => ({ source: "page" as const, page }))).map((hit) => {
+    if (hit.source === "page") return `<li><a href="/wiki/${encodeURIComponent(hit.page.alias)}">${escapeHtml(hit.page.title)}</a><small>Page · ${escapeHtml(hit.page.alias)} · ${formatDate(hit.page.updatedAt)}</small>${hit.page.excerpt ? `<p>${escapeHtml(hit.page.excerpt)}</p>` : ""}</li>`;
+    const item = hit.document;
+    const citation = `/documents/${item.documentId}/content?offset=${Math.floor(item.ordinal / 50) * 50}#section-${item.ordinal}`;
+    return `<li><a href="${citation}">${escapeHtml(item.filename)} · ${escapeHtml(item.locator.label)}</a><small>Document · ${escapeHtml(item.format.toUpperCase())} · version ${item.version} · ${escapeHtml(item.kind)}${item.hidden ? " · hidden" : ""} · OCR ${escapeHtml(item.ocrStatus)}</small>${item.excerpt ? `<p>${escapeHtml(item.excerpt)}</p>` : ""}</li>`;
+  }).join("");
+  const nextParams = new URLSearchParams({ q: query, tags, status, mode, properties, ...documentFilterQuery(filters), ...(results.nextCursor ? { cursor: results.nextCursor } : {}) });
+  const next = results.nextCursor ? `<p><a class="button secondary" href="/search?${nextParams}">More results</a></p>` : "";
   const notice = results.warning ? `<p class="notice">${escapeHtml(results.warning)}</p>` : `<p><small>Search mode: ${results.mode ?? "lexical"}</small></p>`;
-  return `${form}${notice}${items ? `<ul class="page-list search-results">${items}</ul>${next}` : "<p>No matching pages.</p>"}`;
+  return `${form}${notice}${items ? `<ul class="page-list search-results">${items}</ul>${next}` : "<p>No matches.</p>"}`;
 }
 
 function pageForm(page: Pick<Page, "title" | "alias" | "body" | "tags" | "status" | "parentId" | "properties">, csrf: string, parents: Array<{ id: number; title: string }>): string {
@@ -615,6 +631,42 @@ function statusParam(value: string | null, fallback: PageStatus | "all"): PageSt
   const status = value || fallback;
   if (status === "draft" || status === "published" || status === "archived" || status === "all") return status;
   throw new AppError("invalid_status", "status must be draft, published, archived, or all", 400);
+}
+
+function documentSearchFilters(params: URLSearchParams): DocumentSearchFilters {
+  const sourceValue = params.get("source") || "all";
+  if (sourceValue !== "all" && sourceValue !== "pages" && sourceValue !== "documents") throw new AppError("invalid_search_source", "source must be all, pages, or documents", 400);
+  const formatValue = params.get("format") || undefined;
+  if (formatValue !== undefined && !["docx", "xlsx", "pptx", "pdf", "markdown", "text"].includes(formatValue)) throw new AppError("invalid_document_format", "invalid document format filter", 400);
+  const ocrValue = params.get("ocr_status") || undefined;
+  if (ocrValue !== undefined && !["not_required", "pending", "completed", "partial", "unavailable"].includes(ocrValue)) throw new AppError("invalid_ocr_status", "invalid OCR status filter", 400);
+  const kindValue = params.get("kind") || undefined;
+  if (kindValue !== undefined && !["heading", "paragraph", "table", "slide", "notes", "sheet", "page", "image", "text"].includes(kindValue)) throw new AppError("invalid_section_kind", "invalid document section filter", 400);
+  const hiddenValue = params.get("hidden");
+  if (hiddenValue !== null && hiddenValue !== "" && hiddenValue !== "true" && hiddenValue !== "false") throw new AppError("invalid_hidden_filter", "hidden must be true or false", 400);
+  const date = (name: string): string | undefined => {
+    const value = params.get(name);
+    if (!value) return undefined;
+    if (!/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/.test(value)) throw new AppError("invalid_date_filter", `${name} must be an ISO date or datetime`, 400);
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) throw new AppError("invalid_date_filter", `${name} must be an ISO date or datetime`, 400);
+    return parsed.toISOString();
+  };
+  return {
+    source: sourceValue,
+    documentId: optionalPositiveInteger(params.get("document_id")),
+    format: formatValue as DocumentSearchFilters["format"],
+    version: optionalPositiveInteger(params.get("version")),
+    ocrStatus: ocrValue as DocumentSearchFilters["ocrStatus"],
+    hidden: hiddenValue === null || hiddenValue === "" ? undefined : hiddenValue === "true",
+    kind: kindValue as DocumentSearchFilters["kind"],
+    updatedAfter: date("updated_after"),
+    updatedBefore: date("updated_before"),
+  };
+}
+
+function documentFilterQuery(filters: DocumentSearchFilters): Record<string, string> {
+  return Object.fromEntries(Object.entries({ source: filters.source, document_id: filters.documentId, format: filters.format, version: filters.version, ocr_status: filters.ocrStatus, hidden: filters.hidden, kind: filters.kind, updated_after: filters.updatedAfter?.slice(0, 10), updated_before: filters.updatedBefore?.slice(0, 10) }).filter(([, value]) => value !== undefined && value !== "").map(([key, value]) => [key, String(value)]));
 }
 
 function statusOptions(selected: PageStatus | "all", includeAll: boolean): string {
@@ -730,22 +782,24 @@ async function searchWithFallback(
   limit: number,
   status: PageStatus | "all",
   properties: PageProperties,
+  filters: DocumentSearchFilters,
   signal: AbortSignal,
 ) {
-  if (requestedMode === "lexical" || !query.trim()) return { ...store.search(query, tags, cursor, limit, status, properties), mode: "lexical" as const };
-  if (!embedder) return { ...store.search(query, tags, cursor, limit, status, properties), mode: "lexical" as const, warning: "Semantic search is disabled; showing lexical results." };
+  if (requestedMode === "lexical" || !query.trim()) return lexicalSearch(store, query, tags, cursor, limit, status, properties, filters);
+  if (!embedder) return { ...lexicalSearch(store, query, tags, cursor, limit, status, properties, filters), warning: "Semantic search is disabled; showing lexical results." };
   const semanticState = store.semanticStatus(true, "", 0);
-  if (!semanticState.vectorAvailable || semanticState.indexedPages === 0) {
-    const reason = !semanticState.vectorAvailable ? "sqlite-vec is unavailable" : "no pages have been indexed yet";
-    return { ...store.search(query, tags, cursor, limit, status, properties), mode: "lexical" as const, warning: `Semantic search unavailable (${reason}); showing lexical results.` };
+  if (!semanticState.vectorAvailable || semanticState.indexedPages + semanticState.indexedDocuments === 0) {
+    const reason = !semanticState.vectorAvailable ? "sqlite-vec is unavailable" : "no content has been indexed yet";
+    return { ...lexicalSearch(store, query, tags, cursor, limit, status, properties, filters), warning: `Semantic search unavailable (${reason}); showing lexical results.` };
   }
   try {
-    const result = await hybridSearch(store, embedder, query, tags, cursor, limit, status, properties, signal);
-    const pending = store.semanticStatus(true, "", 0).pendingPages;
-    return pending > 0 ? { ...result, warning: `${pending} page${pending === 1 ? " is" : "s are"} still pending semantic indexing.` } : result;
+    const result = await hybridSearch(store, embedder, query, tags, cursor, limit, status, properties, signal, filters);
+    const state = store.semanticStatus(true, "", 0);
+    const pending = state.pendingPages + state.pendingDocuments;
+    return pending > 0 ? { ...result, warning: `${pending} item${pending === 1 ? " is" : "s are"} still pending semantic indexing.` } : result;
   } catch (error) {
     if (error instanceof AppError && error.code === "invalid_cursor") throw error;
-    return { ...store.search(query, tags, null, limit, status, properties), mode: "lexical" as const, warning: `Semantic search unavailable; showing lexical results. ${error instanceof Error ? error.message : String(error)}` };
+    return { ...lexicalSearch(store, query, tags, null, limit, status, properties, filters), warning: `Semantic search unavailable; showing lexical results. ${error instanceof Error ? error.message : String(error)}` };
   }
 }
 

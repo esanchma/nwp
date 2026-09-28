@@ -6,14 +6,14 @@ const expectedOperations = [
   "acknowledgeDocumentReview", "cancelDocumentExtraction", "createPage", "defineTag", "deleteAttachment", "deletePage", "downloadAttachment", "exportPage", "exportWiki",
   "downloadDocument", "getAttachment", "getDeletedPage", "getDocument", "getDocumentContent", "getDocumentOcrStatus", "getOpenApiDocument", "getPage", "getPageTree", "getRevision", "getSemanticStatus",
   "getRevisionDiff", "importDocument", "importPage", "listAttachments", "listDocuments", "listDocumentVersions", "listPages", "listRevisions", "listTagDefinitions", "listTrash", "replaceDocument",
-  "purgePage", "restoreDeletedPage", "retryDocumentExtraction", "restoreRevision", "searchPages", "updatePage", "uploadAttachment",
+  "purgePage", "restoreDeletedPage", "retryDocumentExtraction", "restoreRevision", "searchKnowledge", "updatePage", "uploadAttachment",
 ];
 
 describe("OpenAPI contract", () => {
   test("is a valid OpenAPI 3.1 document", async () => {
     const validated = await SwaggerParser.validate(structuredClone(openApiDocument) as never) as unknown as { openapi: string; info: { version: string } };
     expect(validated.openapi).toBe("3.1.0");
-    expect(validated.info.version).toBe("0.11.0");
+    expect(validated.info.version).toBe("0.12.0");
   });
 
   test("documents every JSON API operation with unique operation IDs", () => {

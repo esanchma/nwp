@@ -20,6 +20,8 @@ import {
   type DeletedPage,
   type DocumentFormat,
   type DocumentRecord,
+  type DocumentSearchFilters,
+  type DocumentSearchResult,
   type DocumentSection,
   type DocumentStatus,
   type DocumentVersion,
@@ -61,6 +63,23 @@ interface PageRow {
 
 interface SearchRow extends PageRow {
   rank: number;
+}
+
+interface DocumentSearchRow {
+  section_id: number;
+  ordinal: number;
+  document_id: number;
+  version_id: number;
+  version: number;
+  page_id: number;
+  filename: string;
+  format: DocumentFormat;
+  kind: DocumentSection["kind"];
+  locator_json: string;
+  hidden: number;
+  ocr_status: OcrStatus;
+  updated_at: string;
+  excerpt: string;
 }
 
 interface AttachmentRow {
@@ -405,6 +424,69 @@ const migrations = [
     ALTER TABLE document_sections_new RENAME TO document_sections;
     CREATE INDEX document_sections_version_idx ON document_sections(document_version_id, ordinal);
   `,
+  `
+    CREATE VIRTUAL TABLE document_section_search USING fts5(
+      section_id UNINDEXED,
+      document_id UNINDEXED,
+      version_id UNINDEXED,
+      filename,
+      page_title,
+      section_title,
+      kind,
+      locator,
+      content,
+      tokenize = 'unicode61 remove_diacritics 2'
+    );
+    INSERT INTO document_section_search(section_id, document_id, version_id, filename, page_title, section_title, kind, locator, content)
+    SELECT ds.id, d.id, dv.id, d.filename, p.title, COALESCE(ds.title, ''), ds.kind, ds.locator_json, ds.text
+    FROM documents d
+    JOIN pages p ON p.id = d.page_id
+    JOIN document_versions dv ON dv.document_id = d.id
+    JOIN document_sections ds ON ds.document_version_id = dv.id
+    WHERE d.status = 'ready' AND p.deleted_at IS NULL
+      AND dv.version = (SELECT max(current.version) FROM document_versions current WHERE current.document_id = d.id);
+    CREATE TABLE document_semantic_index (
+      document_version_id INTEGER PRIMARY KEY REFERENCES document_versions(id) ON DELETE CASCADE,
+      document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+      content_hash TEXT NOT NULL,
+      model TEXT NOT NULL,
+      dimensions INTEGER NOT NULL,
+      indexed_at TEXT NOT NULL
+    );
+    CREATE INDEX document_semantic_index_document_idx ON document_semantic_index(document_id);
+    CREATE TABLE document_section_chunks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      section_id INTEGER NOT NULL REFERENCES document_sections(id) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      UNIQUE(section_id, ordinal)
+    );
+    CREATE INDEX document_section_chunks_section_idx ON document_section_chunks(section_id, ordinal);
+    CREATE TABLE document_chunk_embeddings (
+      chunk_id INTEGER PRIMARY KEY REFERENCES document_section_chunks(id) ON DELETE CASCADE,
+      model TEXT NOT NULL,
+      dimensions INTEGER NOT NULL,
+      embedding BLOB NOT NULL,
+      indexed_at TEXT NOT NULL
+    );
+    CREATE INDEX document_chunk_embeddings_model_idx ON document_chunk_embeddings(model, dimensions);
+    CREATE TABLE document_semantic_queue (
+      document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+      version_id INTEGER NOT NULL REFERENCES document_versions(id) ON DELETE CASCADE,
+      requested_at TEXT NOT NULL,
+      available_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      revision INTEGER NOT NULL DEFAULT 1,
+      lease_owner TEXT,
+      lease_until TEXT,
+      last_error TEXT
+    );
+    INSERT INTO document_semantic_queue(document_id, version_id, requested_at, available_at)
+    SELECT d.id, dv.id, datetime('now'), datetime('now')
+    FROM documents d JOIN document_versions dv ON dv.document_id = d.id
+    WHERE d.status = 'ready' AND dv.version = (SELECT max(current.version) FROM document_versions current WHERE current.document_id = d.id);
+  `,
 ];
 
 export interface SemanticIndexConfig {
@@ -416,8 +498,11 @@ export interface SemanticIndexConfig {
 }
 
 export interface SemanticIndexTask { pageId: number; revision: number; page: Page | null }
+export interface DocumentSemanticTask { documentId: number; versionId: number; revision: number; owner: string; document: DocumentRecord | null; sections: DocumentSection[] }
+export interface DocumentChunkInput { sectionId: number; ordinal: number; content: string }
 export interface DocumentTask { documentId: number; versionId: number; revision: number; owner: string }
 export interface SemanticNeighbor { pageId: number; chunkId: number; content: string; distance: number }
+export interface DocumentSemanticNeighbor extends DocumentSearchResult { chunkId: number; content: string; distance: number }
 
 export class PageStore {
   readonly db: Database;
@@ -468,7 +553,11 @@ export class PageStore {
       this.db.run("DELETE FROM semantic_page_index");
       this.db.run("DELETE FROM page_chunks");
       this.db.run("DELETE FROM semantic_index_queue");
+      this.db.run("DELETE FROM document_semantic_index");
+      this.db.run("DELETE FROM document_section_chunks");
+      this.db.run("DELETE FROM document_semantic_queue");
       this.db.run("INSERT INTO semantic_index_queue(page_id, requested_at, available_at) SELECT id, ?, ? FROM pages WHERE deleted_at IS NULL", [now, now]);
+      this.db.run("INSERT INTO document_semantic_queue(document_id, version_id, requested_at, available_at) SELECT d.id, dv.id, ?, ? FROM documents d JOIN document_versions dv ON dv.document_id = d.id WHERE d.status = 'ready' AND dv.version = (SELECT max(current.version) FROM document_versions current WHERE current.document_id = d.id)", [now, now]);
       this.db.run("INSERT OR REPLACE INTO semantic_index_config(id, model, dimensions, query_prefix, chunk_characters, chunk_overlap, last_error, updated_at) VALUES (1, ?, ?, ?, ?, ?, NULL, ?)", [config.model, config.dimensions, config.queryPrefix, config.chunkCharacters, config.chunkOverlap, now]);
     }).immediate();
   }
@@ -539,6 +628,72 @@ export class PageStore {
     this.db.run("UPDATE semantic_index_config SET last_error = ?, updated_at = ? WHERE id = 1", [message.slice(0, 2000), new Date().toISOString()]);
   }
 
+  claimDocumentSemanticTask(owner: string, leaseMilliseconds = 60_000): DocumentSemanticTask | null {
+    const now = new Date();
+    const until = new Date(now.getTime() + leaseMilliseconds).toISOString();
+    const claim = this.db.transaction(() => {
+      const row = this.db.query<{ document_id: number; version_id: number; revision: number }, [string, string]>("SELECT document_id, version_id, revision FROM document_semantic_queue WHERE available_at <= ? AND (lease_until IS NULL OR lease_until < ?) ORDER BY requested_at, document_id LIMIT 1").get(now.toISOString(), now.toISOString());
+      if (!row) return null;
+      this.db.run("UPDATE document_semantic_queue SET lease_owner = ?, lease_until = ? WHERE document_id = ? AND revision = ?", [owner, until, row.document_id, row.revision]);
+      return { documentId: row.document_id, versionId: row.version_id, revision: row.revision, owner };
+    }).immediate();
+    if (!claim) return null;
+    try {
+      const document = this.getDocument(claim.documentId);
+      if (document.status !== "ready" || document.currentVersion.id !== claim.versionId) return { ...claim, document: null, sections: [] };
+      return { ...claim, document, sections: this.documentSections(claim.documentId, claim.versionId) };
+    } catch (error) {
+      if (error instanceof AppError && error.status === 404) return { ...claim, document: null, sections: [] };
+      throw error;
+    }
+  }
+
+  renewDocumentSemanticLease(documentId: number, revision: number, owner: string, leaseMilliseconds = 60_000): boolean {
+    return this.db.run("UPDATE document_semantic_queue SET lease_until = ? WHERE document_id = ? AND revision = ? AND lease_owner = ?", [new Date(Date.now() + leaseMilliseconds).toISOString(), documentId, revision, owner]).changes === 1;
+  }
+
+  completeDocumentSemanticTask(task: DocumentSemanticTask, contentHash: string, chunks: DocumentChunkInput[], embeddings: Float32Array[], config: SemanticIndexConfig): void {
+    if (chunks.length !== embeddings.length) throw new Error("document semantic chunk and embedding counts differ");
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      const current = this.db.query<{ revision: number; version_id: number; lease_owner: string | null }, [number]>("SELECT revision, version_id, lease_owner FROM document_semantic_queue WHERE document_id = ?").get(task.documentId);
+      if (!current || current.revision !== task.revision || current.version_id !== task.versionId || current.lease_owner !== task.owner) return;
+      this.db.run("DELETE FROM document_section_chunks WHERE section_id IN (SELECT ds.id FROM document_sections ds JOIN document_versions dv ON dv.id = ds.document_version_id WHERE dv.document_id = ?)", [task.documentId]);
+      this.db.run("DELETE FROM document_semantic_index WHERE document_id = ?", [task.documentId]);
+      const insertChunk = this.db.query("INSERT INTO document_section_chunks(section_id, ordinal, content, content_hash) VALUES (?, ?, ?, ?)");
+      const insertEmbedding = this.db.query("INSERT INTO document_chunk_embeddings(chunk_id, model, dimensions, embedding, indexed_at) VALUES (?, ?, ?, ?, ?)");
+      for (let index = 0; index < chunks.length; index += 1) {
+        const chunk = chunks[index]!;
+        const embedding = embeddings[index]!;
+        if (embedding.length !== config.dimensions) throw new Error(`embedding has ${embedding.length} dimensions; expected ${config.dimensions}`);
+        const result = insertChunk.run(chunk.sectionId, chunk.ordinal, chunk.content, createHash("sha256").update(chunk.content).digest("hex"));
+        insertEmbedding.run(Number(result.lastInsertRowid), config.model, config.dimensions, embedding, now);
+      }
+      this.db.run("INSERT INTO document_semantic_index(document_version_id, document_id, content_hash, model, dimensions, indexed_at) VALUES (?, ?, ?, ?, ?, ?)", [task.versionId, task.documentId, contentHash, config.model, config.dimensions, now]);
+      this.db.run("DELETE FROM document_semantic_queue WHERE document_id = ? AND revision = ?", [task.documentId, task.revision]);
+      this.db.run("UPDATE semantic_index_config SET last_error = NULL, updated_at = ? WHERE id = 1", [now]);
+    }).immediate();
+  }
+
+  removeSemanticDocument(task: DocumentSemanticTask): void {
+    this.db.transaction(() => {
+      const current = this.db.query<{ revision: number; version_id: number; lease_owner: string | null }, [number]>("SELECT revision, version_id, lease_owner FROM document_semantic_queue WHERE document_id = ?").get(task.documentId);
+      if (!current || current.revision !== task.revision || current.version_id !== task.versionId || current.lease_owner !== task.owner) return;
+      this.db.run("DELETE FROM document_section_chunks WHERE section_id IN (SELECT ds.id FROM document_sections ds JOIN document_versions dv ON dv.id = ds.document_version_id WHERE dv.document_id = ?)", [task.documentId]);
+      this.db.run("DELETE FROM document_semantic_index WHERE document_id = ?", [task.documentId]);
+      this.db.run("DELETE FROM document_semantic_queue WHERE document_id = ? AND revision = ?", [task.documentId, task.revision]);
+    }).immediate();
+  }
+
+  failDocumentSemanticTask(task: DocumentSemanticTask, message: string): void {
+    const row = this.db.query<{ attempts: number }, [number, number, number, string]>("SELECT attempts FROM document_semantic_queue WHERE document_id = ? AND version_id = ? AND revision = ? AND lease_owner = ?").get(task.documentId, task.versionId, task.revision, task.owner);
+    if (!row) return;
+    const attempts = row.attempts + 1;
+    const available = new Date(Date.now() + Math.min(300_000, 1000 * 2 ** Math.min(attempts, 8))).toISOString();
+    this.db.run("UPDATE document_semantic_queue SET attempts = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, last_error = ? WHERE document_id = ? AND version_id = ? AND revision = ? AND lease_owner = ?", [attempts, available, message.slice(0, 2000), task.documentId, task.versionId, task.revision, task.owner]);
+    this.db.run("UPDATE semantic_index_config SET last_error = ?, updated_at = ? WHERE id = 1", [message.slice(0, 2000), new Date().toISOString()]);
+  }
+
   semanticNeighbors(embedding: Float32Array, limit = 50, status: PageStatus | "all" = "published"): SemanticNeighbor[] {
     if (!this.vectorAvailable) throw new AppError("semantic_unavailable", "semantic vector search is unavailable", 503);
     const config = this.db.query<{ model: string; dimensions: number }, []>("SELECT model, dimensions FROM semantic_index_config WHERE id = 1").get();
@@ -559,8 +714,10 @@ export class PageStore {
   semanticStatus(enabled: boolean, model: string, dimensions: number): SemanticStatus {
     const pendingPages = this.db.query<{ count: number }, []>("SELECT count(*) AS count FROM semantic_index_queue").get()!.count;
     const indexedPages = this.db.query<{ count: number }, []>("SELECT count(*) AS count FROM semantic_page_index").get()!.count;
+    const pendingDocuments = this.db.query<{ count: number }, []>("SELECT count(*) AS count FROM document_semantic_queue").get()!.count;
+    const indexedDocuments = this.db.query<{ count: number }, []>("SELECT count(*) AS count FROM document_semantic_index").get()!.count;
     const row = this.db.query<{ last_error: string | null }, []>("SELECT last_error FROM semantic_index_config WHERE id = 1").get();
-    return { enabled, vectorAvailable: this.vectorAvailable, model, dimensions, pendingPages, indexedPages, lastError: row?.last_error ?? null };
+    return { enabled, vectorAvailable: this.vectorAvailable, model, dimensions, pendingPages, indexedPages, pendingDocuments, indexedDocuments, lastError: row?.last_error ?? null };
   }
 
   resolveTags(values: string[]): string[] {
@@ -664,6 +821,7 @@ export class PageStore {
         this.replaceProperties(id, properties);
         this.replaceLinks(id, body);
         this.refreshSearch(id);
+        this.refreshDocumentSearchForPage(id);
       });
       update.immediate();
       return this.getById(id);
@@ -743,6 +901,48 @@ export class PageStore {
       pages: selected.map((row) => ({ ...this.summary(row), excerpt: excerpt(row.body) })),
       nextCursor: hasMore ? encodeSearchCursor(offset + limit) : null,
     };
+  }
+
+  searchDocumentSections(query: string, filters: DocumentSearchFilters, tags: string[] = [], statusValue: PageStatus | "all" = "published", propertyFilters: PageProperties = {}, limitValue = 100): DocumentSearchResult[] {
+    const terms = ftsQuery(query);
+    const normalizedTags = this.canonicalizeTags(tags);
+    const properties = normalizeProperties(propertyFilters);
+    const status = statusFilter(statusValue);
+    const { clauses, bindings } = documentSearchClauses(filters, normalizedTags, properties, status);
+    const limit = Math.max(1, Math.min(100, Math.trunc(limitValue)));
+    const select = `SELECT ds.id AS section_id, ds.ordinal, d.id AS document_id, dv.id AS version_id, dv.version, d.page_id, d.filename, d.format, ds.kind, ds.locator_json, ds.hidden, d.ocr_status, d.updated_at`;
+    const joins = ` JOIN document_sections ds ON ds.id = document_section_search.section_id JOIN document_versions dv ON dv.id = ds.document_version_id JOIN documents d ON d.id = dv.document_id JOIN pages p ON p.id = d.page_id`;
+    const where = [`d.status = 'ready'`, "p.deleted_at IS NULL", "dv.id = (SELECT current.id FROM document_versions current WHERE current.document_id = d.id ORDER BY current.version DESC LIMIT 1)", ...clauses];
+    const sql = terms
+      ? `${select}, snippet(document_section_search, 8, '', '', ' … ', 32) AS excerpt FROM document_section_search${joins} WHERE document_section_search MATCH ? AND ${where.join(" AND ")} ORDER BY bm25(document_section_search), ds.id DESC LIMIT ?`
+      : `${select}, substr(ds.text, 1, 500) AS excerpt FROM document_section_search${joins} WHERE ${where.join(" AND ")} ORDER BY d.updated_at DESC, ds.id DESC LIMIT ?`;
+    const rows = this.db.query<DocumentSearchRow, any[]>(sql).all(...(terms ? [terms] : []), ...bindings, limit);
+    return rows.map(toDocumentSearchResult);
+  }
+
+  semanticDocumentNeighbors(embedding: Float32Array, filters: DocumentSearchFilters, tags: string[] = [], statusValue: PageStatus | "all" = "published", propertyFilters: PageProperties = {}, limitValue = 100): DocumentSemanticNeighbor[] {
+    if (!this.vectorAvailable) throw new AppError("semantic_unavailable", "semantic vector search is unavailable", 503);
+    const config = this.db.query<{ model: string; dimensions: number }, []>("SELECT model, dimensions FROM semantic_index_config WHERE id = 1").get();
+    if (!config || embedding.length !== config.dimensions) throw new AppError("semantic_unavailable", "semantic index configuration is unavailable", 503);
+    const normalizedTags = this.canonicalizeTags(tags);
+    const properties = normalizeProperties(propertyFilters);
+    const status = statusFilter(statusValue);
+    const { clauses, bindings } = documentSearchClauses(filters, normalizedTags, properties, status);
+    const rows = this.db.query<DocumentSearchRow & { chunk_id: number; content: string; distance: number }, any[]>(`
+      SELECT ds.id AS section_id, ds.ordinal, d.id AS document_id, dv.id AS version_id, dv.version, d.page_id, d.filename, d.format, ds.kind, ds.locator_json, ds.hidden, d.ocr_status, d.updated_at,
+        dsc.id AS chunk_id, dsc.content, substr(ds.text, 1, 500) AS excerpt, vec_distance_cosine(dce.embedding, ?) AS distance
+      FROM document_chunk_embeddings dce
+      JOIN document_section_chunks dsc ON dsc.id = dce.chunk_id
+      JOIN document_sections ds ON ds.id = dsc.section_id
+      JOIN document_versions dv ON dv.id = ds.document_version_id
+      JOIN documents d ON d.id = dv.document_id
+      JOIN pages p ON p.id = d.page_id
+      WHERE dce.model = ? AND dce.dimensions = ? AND d.status = 'ready' AND p.deleted_at IS NULL
+        AND dv.id = (SELECT current.id FROM document_versions current WHERE current.document_id = d.id ORDER BY current.version DESC LIMIT 1)
+        ${clauses.length ? `AND ${clauses.join(" AND ")}` : ""}
+      ORDER BY distance LIMIT ?
+    `).all(embedding, config.model, config.dimensions, ...bindings, Math.max(1, Math.min(100, limitValue)));
+    return rows.map((row) => ({ ...toDocumentSearchResult(row), chunkId: row.chunk_id, content: row.content, distance: row.distance }));
   }
 
   listTags(): Array<{ tag: string; count: number }> {
@@ -872,6 +1072,10 @@ export class PageStore {
         const nextVersion = current.currentVersion.version + 1;
         this.db.run("UPDATE document_versions SET status = 'superseded' WHERE document_id = ? AND status IN ('queued', 'extracting')", [documentId]);
         const version = this.db.run("INSERT INTO document_versions(document_id, version, blob_sha256, status, created_at) VALUES (?, ?, ?, 'queued', ?)", [documentId, nextVersion, sha256, now]);
+        this.db.run("DELETE FROM document_section_search WHERE document_id = ?", [documentId]);
+        this.db.run("DELETE FROM document_section_chunks WHERE section_id IN (SELECT ds.id FROM document_sections ds JOIN document_versions dv ON dv.id = ds.document_version_id WHERE dv.document_id = ?)", [documentId]);
+        this.db.run("DELETE FROM document_semantic_index WHERE document_id = ?", [documentId]);
+        this.db.run("DELETE FROM document_semantic_queue WHERE document_id = ?", [documentId]);
         this.db.run("UPDATE documents SET filename = ?, mime_type = ?, format = ?, status = 'queued', needs_ocr = 0, ocr_status = 'not_required', needs_review = ?, last_error = NULL, updated_at = ? WHERE id = ?", [filename, mimeType, format, humanEdited ? 1 : managed.needs_review, now, documentId]);
         this.db.run("INSERT INTO document_jobs(document_id, version_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, ?, 0, 1) ON CONFLICT(document_id) DO UPDATE SET version_id = excluded.version_id, requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = document_jobs.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [documentId, Number(version.lastInsertRowid), now, now]);
       }).immediate();
@@ -954,6 +1158,14 @@ export class PageStore {
       this.db.run("DELETE FROM document_sections WHERE document_version_id = ?", [task.versionId]);
       const insert = this.db.query("INSERT INTO document_sections(document_version_id, ordinal, kind, title, locator_json, text, hidden, needs_ocr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
       extraction.sections.forEach((item, index) => insert.run(task.versionId, index, item.kind, item.title, JSON.stringify(item.locator), item.text, item.hidden ? 1 : 0, item.needsOcr ? 1 : 0));
+      this.db.run("DELETE FROM document_section_search WHERE document_id = ?", [task.documentId]);
+      this.db.run(`INSERT INTO document_section_search(section_id, document_id, version_id, filename, page_title, section_title, kind, locator, content)
+        SELECT ds.id, d.id, dv.id, d.filename, p.title, COALESCE(ds.title, ''), ds.kind, ds.locator_json, ds.text
+        FROM document_sections ds JOIN document_versions dv ON dv.id = ds.document_version_id JOIN documents d ON d.id = dv.document_id JOIN pages p ON p.id = d.page_id
+        WHERE ds.document_version_id = ?`, [task.versionId]);
+      this.db.run("DELETE FROM document_section_chunks WHERE section_id IN (SELECT ds.id FROM document_sections ds JOIN document_versions dv ON dv.id = ds.document_version_id WHERE dv.document_id = ?)", [task.documentId]);
+      this.db.run("DELETE FROM document_semantic_index WHERE document_id = ?", [task.documentId]);
+      this.db.run("INSERT INTO document_semantic_queue(document_id, version_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, ?, 0, 1) ON CONFLICT(document_id) DO UPDATE SET version_id = excluded.version_id, requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = document_semantic_queue.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [task.documentId, task.versionId, now, now]);
       this.db.run("UPDATE document_versions SET status = 'ready', parser_version = ?, metadata_json = ?, ocr_status = ?, warnings_json = ?, extracted_at = ? WHERE id = ?", [parserVersion, JSON.stringify(extraction.metadata), extraction.ocrStatus, JSON.stringify(extraction.warnings), now, task.versionId]);
       this.db.run("UPDATE documents SET status = 'ready', needs_ocr = ?, ocr_status = ?, last_error = NULL, updated_at = ? WHERE id = ?", [extraction.needsOcr ? 1 : 0, extraction.ocrStatus, now, task.documentId]);
       this.db.run("DELETE FROM document_jobs WHERE document_id = ? AND revision = ?", [task.documentId, task.revision]);
@@ -1012,6 +1224,14 @@ export class PageStore {
     const version = this.db.query<DocumentVersionRow, [number]>(documentVersionSelect("dv.document_id = ?") + " ORDER BY dv.version DESC LIMIT 1").get(row.id);
     if (!version) throw new Error(`document ${row.id} has no version`);
     return { id: row.id, pageId: row.page_id, filename: row.filename, mimeType: row.mime_type, format: row.format, status: row.status, needsOcr: row.needs_ocr === 1, ocrStatus: row.ocr_status, needsReview: row.needs_review === 1, lastError: row.last_error, createdAt: row.created_at, updatedAt: row.updated_at, currentVersion: toDocumentVersion(version) };
+  }
+
+  private refreshDocumentSearchForPage(pageId: number): void {
+    this.db.run("DELETE FROM document_section_search WHERE document_id IN (SELECT id FROM documents WHERE page_id = ?)", [pageId]);
+    this.db.run(`INSERT INTO document_section_search(section_id, document_id, version_id, filename, page_title, section_title, kind, locator, content)
+      SELECT ds.id, d.id, dv.id, d.filename, p.title, COALESCE(ds.title, ''), ds.kind, ds.locator_json, ds.text
+      FROM documents d JOIN pages p ON p.id = d.page_id JOIN document_versions dv ON dv.document_id = d.id JOIN document_sections ds ON ds.document_version_id = dv.id
+      WHERE d.page_id = ? AND d.status = 'ready' AND p.deleted_at IS NULL AND dv.id = (SELECT current.id FROM document_versions current WHERE current.document_id = d.id ORDER BY current.version DESC LIMIT 1)`, [pageId]);
   }
 
   private ensureBlob(bytes: Uint8Array, mimeType: string, now: string): string {
@@ -1159,6 +1379,7 @@ export class PageStore {
       "SELECT blob_sha256 AS sha256 FROM page_attachments WHERE page_id = ? UNION SELECT dv.blob_sha256 AS sha256 FROM document_versions dv JOIN documents d ON d.id = dv.document_id WHERE d.page_id = ?",
     ).all(pageId, pageId).map(({ sha256 }) => sha256);
     const purge = this.db.transaction(() => {
+      this.db.run("DELETE FROM document_section_search WHERE document_id IN (SELECT id FROM documents WHERE page_id = ?)", [pageId]);
       this.db.run("DELETE FROM pages WHERE id = ?", [pageId]);
       return hashes.filter((hash) => this.removeBlobIfOrphaned(hash));
     });
@@ -1363,6 +1584,27 @@ export class PageStore {
       [pageId],
     );
   }
+}
+
+function documentSearchClauses(filters: DocumentSearchFilters, tags: string[], properties: PageProperties, status: PageStatus | "all"): { clauses: string[]; bindings: Array<string | number> } {
+  const clauses: string[] = [];
+  const bindings: Array<string | number> = [];
+  if (status !== "all") { clauses.push("p.status = ?"); bindings.push(status); }
+  for (const tag of tags) { clauses.push("EXISTS (SELECT 1 FROM page_tags filter_tag WHERE filter_tag.page_id = p.id AND filter_tag.tag = ? COLLATE NOCASE)"); bindings.push(tag); }
+  for (const [key, value] of Object.entries(properties)) { clauses.push("EXISTS (SELECT 1 FROM page_properties filter_property WHERE filter_property.page_id = p.id AND filter_property.key = ? COLLATE NOCASE AND filter_property.value_json = ?)"); bindings.push(key, JSON.stringify(value)); }
+  if (filters.documentId !== undefined) { clauses.push("d.id = ?"); bindings.push(filters.documentId); }
+  if (filters.format !== undefined) { clauses.push("d.format = ?"); bindings.push(filters.format); }
+  if (filters.version !== undefined) { clauses.push("dv.version = ?"); bindings.push(filters.version); }
+  if (filters.ocrStatus !== undefined) { clauses.push("d.ocr_status = ?"); bindings.push(filters.ocrStatus); }
+  if (filters.hidden !== undefined) { clauses.push("ds.hidden = ?"); bindings.push(filters.hidden ? 1 : 0); }
+  if (filters.kind !== undefined) { clauses.push("ds.kind = ?"); bindings.push(filters.kind); }
+  if (filters.updatedAfter !== undefined) { clauses.push("d.updated_at >= ?"); bindings.push(filters.updatedAfter); }
+  if (filters.updatedBefore !== undefined) { clauses.push("d.updated_at < ?"); bindings.push(filters.updatedBefore); }
+  return { clauses, bindings };
+}
+
+function toDocumentSearchResult(row: DocumentSearchRow): DocumentSearchResult {
+  return { sectionId: row.section_id, ordinal: row.ordinal, documentId: row.document_id, versionId: row.version_id, version: row.version, pageId: row.page_id, filename: row.filename, format: row.format, kind: row.kind, locator: JSON.parse(row.locator_json), hidden: row.hidden === 1, ocrStatus: row.ocr_status, updatedAt: row.updated_at, excerpt: row.excerpt };
 }
 
 function documentVersionSelect(where: string): string {

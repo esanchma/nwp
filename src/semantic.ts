@@ -3,8 +3,8 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync,
 import { join } from "node:path";
 import vecEmbeddedPath from "sqlite-vec-linux-x64/vec0.so" with { type: "file" };
 import type { SemanticSearchConfig } from "./config.ts";
-import type { PageStore, SemanticIndexConfig } from "./database.ts";
-import { AppError, normalizeProperties, normalizeTags, type Page, type PageProperties, type PageStatus, type SearchResults } from "./domain.ts";
+import type { DocumentChunkInput, PageStore, SemanticIndexConfig } from "./database.ts";
+import { AppError, normalizeProperties, normalizeTags, type DocumentRecord, type DocumentSearchFilters, type DocumentSection, type Page, type PageProperties, type PageStatus, type SearchHit, type SearchResults } from "./domain.ts";
 
 interface OllamaEmbedResponse { embeddings: number[][] }
 
@@ -88,24 +88,46 @@ export class SemanticIndexer {
 
   async runOne(signal?: AbortSignal): Promise<boolean> {
     const task = this.store.claimSemanticTask(this.owner);
-    if (!task) return false;
+    if (task) {
+      try {
+        if (!task.page) {
+          this.store.removeSemanticPage(task.pageId, task.revision);
+          return true;
+        }
+        const chunks = chunkPage(task.page, this.config.chunkCharacters, this.config.chunkOverlap);
+        const embeddings = await this.embedBatches(chunks, () => this.store.renewSemanticLease(task.pageId, task.revision, this.owner), signal);
+        this.store.completeSemanticTask(task.pageId, task.revision, pageContentHash(task.page), chunks, embeddings, this.indexConfig);
+      } catch (error) {
+        this.store.failSemanticTask(task.pageId, task.revision, error instanceof Error ? error.message : String(error));
+        if (signal?.aborted) throw error;
+      }
+      return true;
+    }
+
+    const documentTask = this.store.claimDocumentSemanticTask(this.owner);
+    if (!documentTask) return false;
     try {
-      if (!task.page) {
-        this.store.removeSemanticPage(task.pageId, task.revision);
+      if (!documentTask.document) {
+        this.store.removeSemanticDocument(documentTask);
         return true;
       }
-      const chunks = chunkPage(task.page, this.config.chunkCharacters, this.config.chunkOverlap);
-      const embeddings: Float32Array[] = [];
-      for (let offset = 0; offset < chunks.length; offset += 16) {
-        if (!this.store.renewSemanticLease(task.pageId, task.revision, this.owner)) throw new Error("semantic indexing task was superseded");
-        embeddings.push(...await this.embedder.embedDocuments(chunks.slice(offset, offset + 16), signal));
-      }
-      this.store.completeSemanticTask(task.pageId, task.revision, pageContentHash(task.page), chunks, embeddings, this.indexConfig);
+      const chunks = chunkDocumentSections(documentTask.document, documentTask.sections, this.config.chunkCharacters, this.config.chunkOverlap);
+      const embeddings = await this.embedBatches(chunks.map(({ content }) => content), () => this.store.renewDocumentSemanticLease(documentTask.documentId, documentTask.revision, this.owner), signal);
+      this.store.completeDocumentSemanticTask(documentTask, documentContentHash(documentTask.document, documentTask.sections), chunks, embeddings, this.indexConfig);
     } catch (error) {
-      this.store.failSemanticTask(task.pageId, task.revision, error instanceof Error ? error.message : String(error));
+      this.store.failDocumentSemanticTask(documentTask, error instanceof Error ? error.message : String(error));
       if (signal?.aborted) throw error;
     }
     return true;
+  }
+
+  private async embedBatches(chunks: string[], renew: () => boolean, signal?: AbortSignal): Promise<Float32Array[]> {
+    const embeddings: Float32Array[] = [];
+    for (let offset = 0; offset < chunks.length; offset += 16) {
+      if (!renew()) throw new Error("semantic indexing task was superseded");
+      embeddings.push(...await this.embedder.embedDocuments(chunks.slice(offset, offset + 16), signal));
+    }
+    return embeddings;
   }
 
   async runUntilIdle(signal?: AbortSignal): Promise<number> {
@@ -122,6 +144,22 @@ export class SemanticIndexer {
   }
 }
 
+export function lexicalSearch(
+  store: PageStore,
+  query: string,
+  tags: string[],
+  cursor: string | null,
+  limit: number,
+  status: PageStatus | "all",
+  properties: PageProperties,
+  filters: DocumentSearchFilters = { source: "all" },
+): SearchResults {
+  const normalizedTags = store.resolveTags(normalizeTags(tags));
+  const normalizedProperties = normalizeProperties(properties);
+  const { scores, hits } = lexicalCandidates(store, query, normalizedTags, status, normalizedProperties, filters);
+  return paginateHits(scores, hits, cursor, limit, searchFingerprint("lexical", query, normalizedTags, status, normalizedProperties, filters), "lexical");
+}
+
 export async function hybridSearch(
   store: PageStore,
   embedder: OllamaEmbedder,
@@ -132,37 +170,86 @@ export async function hybridSearch(
   status: PageStatus | "all",
   properties: PageProperties,
   signal?: AbortSignal,
+  filters: DocumentSearchFilters = { source: "all" },
 ): Promise<SearchResults> {
   const normalizedTags = store.resolveTags(normalizeTags(tags));
   const normalizedProperties = normalizeProperties(properties);
-  const fingerprint = createHash("sha256").update(JSON.stringify({ query, tags: normalizedTags, status, properties: normalizedProperties })).digest("hex").slice(0, 16);
-  const offset = decodeHybridCursor(cursor, fingerprint);
-  const lexical = store.search(query, normalizedTags, null, 100, status, normalizedProperties);
-  if (!query.trim()) return { ...lexical, mode: "lexical" };
+  if (!query.trim()) return lexicalSearch(store, query, normalizedTags, cursor, limit, status, normalizedProperties, filters);
+  const { scores, hits } = lexicalCandidates(store, query, normalizedTags, status, normalizedProperties, filters);
   const queryEmbedding = await embedder.embedQuery(query, signal);
-  const semantic = store.semanticNeighbors(queryEmbedding, 100, status);
-  const scores = new Map<number, number>();
-  const excerpts = new Map<number, string>();
-  const summaries = new Map(lexical.pages.map((page) => [page.id, page]));
-  lexical.pages.forEach((page, index) => {
-    scores.set(page.id, (scores.get(page.id) ?? 0) + 1 / (60 + index + 1));
-    excerpts.set(page.id, page.excerpt);
-  });
-  semantic.forEach((neighbor, index) => {
-    let page: Page;
-    try { page = store.getById(neighbor.pageId); }
-    catch { return; }
-    if (!normalizedTags.every((tag) => page.tags.includes(tag))) return;
-    if (!Object.entries(normalizedProperties).every(([key, value]) => JSON.stringify(page.properties[key]) === JSON.stringify(value))) return;
-    scores.set(page.id, (scores.get(page.id) ?? 0) + 1 / (60 + index + 1));
-    summaries.set(page.id, { id: page.id, title: page.title, alias: page.alias, tags: page.tags, status: page.status, parentId: page.parentId, createdAt: page.createdAt, updatedAt: page.updatedAt, excerpt: neighbor.content.slice(0, 240) });
-    if (!excerpts.has(page.id)) excerpts.set(page.id, neighbor.content.slice(0, 240));
-  });
-  const ranked = [...scores.entries()].sort((left, right) => right[1] - left[1] || right[0] - left[0]).map(([id]) => ({ ...summaries.get(id)!, excerpt: excerpts.get(id) ?? "" }));
-  const pageLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
-  const pages = ranked.slice(offset, offset + pageLimit);
-  const nextOffset = offset + pages.length;
-  return { pages, nextCursor: nextOffset < ranked.length ? encodeHybridCursor(nextOffset, fingerprint) : null, mode: "hybrid" };
+
+  if (pageSearchEligible(filters)) {
+    store.semanticNeighbors(queryEmbedding, 100, status).forEach((neighbor, index) => {
+      let page: Page;
+      try { page = store.getById(neighbor.pageId); } catch { return; }
+      if (!normalizedTags.every((tag) => page.tags.includes(tag))) return;
+      if (!Object.entries(normalizedProperties).every(([key, value]) => JSON.stringify(page.properties[key]) === JSON.stringify(value))) return;
+      const key = `p:${page.id}`;
+      scores.set(key, (scores.get(key) ?? 0) + 1 / (60 + index + 1));
+      if (!hits.has(key)) hits.set(key, { source: "page", page: { id: page.id, title: page.title, alias: page.alias, tags: page.tags, status: page.status, parentId: page.parentId, createdAt: page.createdAt, updatedAt: page.updatedAt, excerpt: neighbor.content.slice(0, 240) } });
+    });
+  }
+
+  if (filters.source !== "pages") {
+    const seenSections = new Set<number>();
+    store.semanticDocumentNeighbors(queryEmbedding, filters, normalizedTags, status, normalizedProperties, 100).forEach((neighbor, index) => {
+      if (seenSections.has(neighbor.sectionId)) return;
+      seenSections.add(neighbor.sectionId);
+      const key = `d:${neighbor.sectionId}`;
+      scores.set(key, (scores.get(key) ?? 0) + 1 / (60 + index + 1));
+      if (!hits.has(key)) {
+        const { chunkId: _chunkId, content: _content, distance: _distance, ...document } = neighbor;
+        hits.set(key, { source: "document", document: { ...document, excerpt: document.excerpt.slice(0, 500) } });
+      }
+    });
+  }
+
+  suppressLinkedPageDuplicates(scores, hits);
+  return paginateHits(scores, hits, cursor, limit, searchFingerprint("hybrid", query, normalizedTags, status, normalizedProperties, filters), "hybrid");
+}
+
+function lexicalCandidates(store: PageStore, query: string, tags: string[], status: PageStatus | "all", properties: PageProperties, filters: DocumentSearchFilters): { scores: Map<string, number>; hits: Map<string, SearchHit> } {
+  const scores = new Map<string, number>();
+  const hits = new Map<string, SearchHit>();
+  const pageCriteria = Boolean(query.trim() || tags.length || Object.keys(properties).length);
+  const documentCriteria = Boolean(query.trim() || tags.length || Object.keys(properties).length || filters.source === "documents" || documentFiltersActive(filters));
+  if (pageSearchEligible(filters) && pageCriteria) {
+    const pages = store.search(query, tags, null, 100, status, properties).pages;
+    pages.forEach((page, index) => { const key = `p:${page.id}`; scores.set(key, 1 / (60 + index + 1)); hits.set(key, { source: "page", page }); });
+  }
+  if (filters.source !== "pages" && documentCriteria) {
+    const documents = store.searchDocumentSections(query, filters, tags, status, properties, 100);
+    documents.forEach((document, index) => { const key = `d:${document.sectionId}`; scores.set(key, 1 / (60 + index + 1)); hits.set(key, { source: "document", document }); });
+  }
+  if (!pageCriteria && !documentCriteria) throw new AppError("empty_search", "search text or a compatible filter is required", 400);
+  suppressLinkedPageDuplicates(scores, hits);
+  return { scores, hits };
+}
+
+function pageSearchEligible(filters: DocumentSearchFilters): boolean {
+  return filters.source !== "documents" && !documentFiltersActive(filters);
+}
+
+function documentFiltersActive(filters: DocumentSearchFilters): boolean {
+  return filters.documentId !== undefined || filters.format !== undefined || filters.version !== undefined || filters.ocrStatus !== undefined || filters.hidden !== undefined || filters.kind !== undefined || filters.updatedAfter !== undefined || filters.updatedBefore !== undefined;
+}
+
+function suppressLinkedPageDuplicates(scores: Map<string, number>, hits: Map<string, SearchHit>): void {
+  const documentPages = new Set([...hits.values()].flatMap((hit) => hit.source === "document" ? [hit.document.pageId] : []));
+  for (const pageId of documentPages) { scores.delete(`p:${pageId}`); hits.delete(`p:${pageId}`); }
+}
+
+function paginateHits(scores: Map<string, number>, hits: Map<string, SearchHit>, cursor: string | null, limit: number, fingerprint: string, mode: "lexical" | "hybrid"): SearchResults {
+  const offset = decodeHybridCursor(cursor, fingerprint);
+  const ranked = [...scores.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).map(([key]) => hits.get(key)!).filter(Boolean);
+  const bounded = Math.max(1, Math.min(100, Math.trunc(limit)));
+  const selected = ranked.slice(offset, offset + bounded);
+  const nextOffset = offset + selected.length;
+  return { pages: selected.flatMap((hit) => hit.source === "page" ? [hit.page] : []), hits: selected, nextCursor: nextOffset < ranked.length ? encodeHybridCursor(nextOffset, fingerprint) : null, mode };
+}
+
+function searchFingerprint(mode: string, query: string, tags: string[], status: PageStatus | "all", properties: PageProperties, filters: DocumentSearchFilters): string {
+  return createHash("sha256").update(JSON.stringify({ mode, query, tags, status, properties, filters })).digest("hex").slice(0, 16);
 }
 
 function encodeHybridCursor(offset: number, fingerprint: string): string {
@@ -180,8 +267,17 @@ function decodeHybridCursor(cursor: string | null, fingerprint: string): number 
 
 export function chunkPage(page: Page, maximum: number, overlap: number): string[] {
   const metadata = [page.title, page.alias, page.tags.join(" "), Object.entries(page.properties).map(([key, value]) => `${key}: ${String(value)}`).join("\n")].filter(Boolean).join("\n");
-  const source = `${metadata}\n\n${page.body}`.trim();
-  if (!source) return [page.title];
+  return chunkText(`${metadata}\n\n${page.body}`.trim() || page.title, maximum, overlap);
+}
+
+export function chunkDocumentSections(document: DocumentRecord, sections: DocumentSection[], maximum: number, overlap: number): DocumentChunkInput[] {
+  return sections.flatMap((item) => {
+    const prefix = [document.filename, document.format.toUpperCase(), item.kind, item.locator.label, item.hidden ? "hidden" : ""].filter(Boolean).join("\n");
+    return chunkText(`${prefix}\n\n${item.text}`.trim(), maximum, overlap).map((content, ordinal) => ({ sectionId: item.id, ordinal, content }));
+  });
+}
+
+function chunkText(source: string, maximum: number, overlap: number): string[] {
   const chunks: string[] = [];
   let start = 0;
   while (start < source.length) {
@@ -200,4 +296,8 @@ export function chunkPage(page: Page, maximum: number, overlap: number): string[
 
 export function pageContentHash(page: Page): string {
   return createHash("sha256").update(JSON.stringify({ title: page.title, alias: page.alias, body: page.body, tags: page.tags, properties: page.properties })).digest("hex");
+}
+
+export function documentContentHash(document: DocumentRecord, sections: DocumentSection[]): string {
+  return createHash("sha256").update(JSON.stringify({ versionId: document.currentVersion.id, sha256: document.currentVersion.sha256, sections: sections.map(({ id, kind, locator, text, hidden }) => ({ id, kind, locator, text, hidden })) })).digest("hex");
 }

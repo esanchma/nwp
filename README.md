@@ -115,6 +115,7 @@ Page commands connect to the running local server and read the generated token a
 ./dist/nwp attachment get 4 --output ./diagram.png
 ./dist/nwp attachment delete 4
 ./dist/nwp search "installation runtime" --tags "nwp,guide" --status published
+./dist/nwp search "approval policy" --source documents --format pdf --ocr-status completed --kind page
 ./dist/nwp tree --status all
 ./dist/nwp tag define --tag topic:artificial-intelligence --kind topic --name "Artificial intelligence" --aliases "ai,ia,inteligencia-artificial"
 ./dist/nwp tag list
@@ -155,7 +156,7 @@ Available operations:
 - `GET /api/v1/pages?limit=50&cursor=...`
 - `GET /api/v1/pages/:id-or-alias`
 - `PUT /api/v1/pages/:id`
-- `GET /api/v1/search?q=terms&mode=hybrid&tags=tag-one,tag-two&status=published&properties={...}`
+- `GET /api/v1/search?q=terms&mode=hybrid&source=all&format=pdf&kind=page&ocr_status=completed&hidden=false`
 - `GET|POST /api/v1/tags/definitions`
 - `GET /api/v1/semantic/status`
 - `GET|POST /api/v1/documents`
@@ -213,6 +214,7 @@ Tools:
 - `get_page`
 - `list_pages`
 - `search_pages`
+- `search_knowledge`
 - `update_page`
 - `get_page_tree`
 - `list_tag_definitions`
@@ -287,6 +289,8 @@ The page displays extracted text virtually rather than duplicating it in Markdow
 
 When enabled, the worker runs local Tesseract OCR with Spanish and English data. It extracts text from DOCX and PPTX images, renders low-text PDF pages through `pdftoppm`, and stores image or page locators with each OCR section. OCR state is `pending`, `completed`, `partial`, or `unavailable`; a missing executable or language pack does not fail native extraction. Install the missing capability and run `nwp document retry ID` to reprocess an OCR-pending document. Use `nwp document ocr-status` to diagnose the runtime.
 
+Every extracted section is added to FTS5 immediately and queued for durable semantic indexing. Document replacement removes stale search entries before the new version is extracted. Results link directly to the cited page, slide, sheet/range, image, or section in the content viewer.
+
 Office archives are parsed without executing macros, formulas, or external connections. Configurable technical guards constrain archive expansion, compression ratio, entry count, XML depth, PDF pages, spreadsheet cells, upload memory, OCR item counts, subprocess time, and OCR output. Run extraction with `nwp worker`, `nwp serve --with-worker`, or the one-shot `nwp document run`.
 
 ## Trash
@@ -303,13 +307,13 @@ Restoring a revision first snapshots the current state, so the restoration itsel
 
 ## Search
 
-Hybrid search combines SQLite FTS5 results with semantic chunk similarity through sqlite-vec and Reciprocal Rank Fusion. It covers titles, aliases, Markdown bodies, tags, properties, and deterministic page chunks. If Ollama or sqlite-vec is unavailable, nwp returns lexical results with a warning.
+Hybrid search combines SQLite FTS5 results with semantic chunk similarity through sqlite-vec and Reciprocal Rank Fusion. It covers titles, aliases, Markdown bodies, tags, properties, deterministic page chunks, and extracted document sections, including OCR text. If Ollama or sqlite-vec is unavailable, nwp returns lexical results with a warning.
 
-Semantic indexing is asynchronous and durable. Run a separate `nwp worker`, use `nwp serve --with-worker`, or execute `nwp index run` as a one-shot. Page writes remain immediate while the index catches up. The default embedding model is `bge-m3`; changing model, dimensions, query prefix, or chunk settings queues a complete reindex.
+Semantic indexing is asynchronous and durable for both pages and current document versions. Run a separate `nwp worker`, use `nwp serve --with-worker`, or execute `nwp index run` as a one-shot. Page writes and lexical document search remain immediate while the vector index catches up. The default embedding model is `bge-m3`; changing model, dimensions, query prefix, or chunk settings queues a complete reindex.
 
 The lexical index uses SQLite FTS5. Words are matched as case-insensitive prefixes. Accent variants match when SQLite can remove their diacritics.
 
-Use the advanced search page to choose hybrid or lexical mode and require tags, a page state, and exact typed property values. Multiple text words, tags, and properties use AND semantics. Search results use opaque cursors for pagination.
+Use the advanced search page to choose hybrid or lexical mode and filter by source, document ID, format, version, OCR state, hidden state, section kind, update interval, tags, page state, and exact typed property values. Multiple text words, tags, and properties use AND semantics. When a matching document section exists, its linked wiki page is suppressed to avoid duplicate results. Search results use opaque cursors for pagination.
 
 ## Tag taxonomy
 
@@ -334,4 +338,4 @@ The main modules are:
 - `src/mcp.ts`: MCP tools and transport
 - `src/main.ts`: executable and CLI
 
-The approved scope and later roadmap are in [`docs/mvp-spec.md`](docs/mvp-spec.md). The sqlite-vec packaging and Ollama embedding experiments are documented in [`docs/semantic-search-spikes.md`](docs/semantic-search-spikes.md).
+The approved scope and later roadmap are in [`docs/mvp-spec.md`](docs/mvp-spec.md). The sqlite-vec packaging and Ollama embedding experiments are documented in [`docs/semantic-search-spikes.md`](docs/semantic-search-spikes.md). The reproducible document retrieval smoke benchmark is in [`docs/document-search-benchmark.md`](docs/document-search-benchmark.md).

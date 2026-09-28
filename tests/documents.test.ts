@@ -97,12 +97,17 @@ describe("document storage and jobs", () => {
     db.db.run("DROP TABLE document_sections");
     db.db.run(`CREATE TABLE document_sections (id INTEGER PRIMARY KEY AUTOINCREMENT, document_version_id INTEGER NOT NULL REFERENCES document_versions(id) ON DELETE CASCADE, ordinal INTEGER NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('heading', 'paragraph', 'table', 'slide', 'notes', 'sheet', 'page', 'text')), title TEXT, locator_json TEXT NOT NULL, text TEXT NOT NULL, hidden INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)), needs_ocr INTEGER NOT NULL DEFAULT 0 CHECK (needs_ocr IN (0, 1)), UNIQUE(document_version_id, ordinal))`);
     db.db.run("CREATE INDEX document_sections_version_idx ON document_sections(document_version_id, ordinal)");
+    db.db.run("DROP TABLE document_section_search");
+    db.db.run("DROP TABLE document_chunk_embeddings");
+    db.db.run("DROP TABLE document_section_chunks");
+    db.db.run("DROP TABLE document_semantic_index");
+    db.db.run("DROP TABLE document_semantic_queue");
     db.db.run("PRAGMA user_version = 8");
     db.close();
     store = new PageStore(path);
     const columns = store.db.query<{ name: string }, []>("PRAGMA table_info(documents)").all().map(({ name }) => name);
     expect(columns).toContain("ocr_status");
-    expect(store.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(9);
+    expect(store.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(10);
   });
 
   test("runs local OCR through Tesseract and stores image citations", async () => {

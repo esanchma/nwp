@@ -55,7 +55,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.11.0" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.12.0" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });
@@ -92,6 +92,14 @@ describe("HTTP API", () => {
     expect(await new DocumentWorker(store, { enabled: true, maxFileBytes: 10_000_000, maxExpandedBytes: 50_000_000, maxArchiveEntries: 10_000, maxCompressionRatio: 1000, maxPdfPages: 10_000, maxSpreadsheetCells: 5_000_000, ocrEnabled: false, tesseractCommand: "tesseract", pdfRendererCommand: "pdftoppm", ocrLanguages: ["spa", "eng"], ocrTimeoutSeconds: 120, maxOcrItems: 10_000, maxOcrOutputCharacters: 1_000_000 }).runUntilIdle()).toBe(1);
     const content = await (await handler(api(`/api/v1/documents/${imported.id}/content`))).json() as { sections: Array<{ text: string }> };
     expect(content.sections[0]?.text).toBe("first source");
+    const searched = await (await handler(api(`/api/v1/search?q=first+source&source=documents&format=text&kind=text&hidden=false`))).json() as { pages: unknown[]; hits: Array<{ source: string; document: { documentId: number } }> };
+    expect(searched.pages).toEqual([]);
+    expect(searched.hits[0]).toMatchObject({ source: "document", document: { documentId: imported.id } });
+    const noHidden = await (await handler(api(`/api/v1/search?q=first+source&source=documents&hidden=true`))).json() as { hits: unknown[] };
+    expect(noHidden.hits).toEqual([]);
+    expect((await handler(api(`/api/v1/search?q=first&format=exe`))).status).toBe(400);
+    const searchPage = await (await handler(request(`/search?q=first+source&source=documents`))).text();
+    expect(searchPage).toContain("#section-0");
     const viewer = await (await handler(request(`/documents/${imported.id}/content`))).text();
     expect(viewer).toContain(`id="section-0"`);
     expect(viewer).toContain("citation §1");
@@ -236,7 +244,7 @@ describe("HTTP API", () => {
     }));
     expect(toolsResponse.status).toBe(200);
     const tools = await toolsResponse.json() as { result: { tools: Array<{ name: string }> } };
-    expect(tools.result.tools.map(({ name }) => name).sort()).toEqual(["acknowledge_document_review", "cancel_document_extraction", "create_page", "define_tag", "delete_attachment", "delete_page", "document_ocr_status", "export_page", "get_attachment", "get_attachment_upload_instructions", "get_deleted_page", "get_document", "get_document_content", "get_document_upload_instructions", "get_full_export", "get_page", "get_page_tree", "get_revision_diff", "import_page", "list_attachments", "list_documents", "list_pages", "list_revisions", "list_tag_definitions", "list_trash", "purge_page", "restore_page", "restore_revision", "retry_document_extraction", "search_pages", "semantic_index_status", "update_page"]);
+    expect(tools.result.tools.map(({ name }) => name).sort()).toEqual(["acknowledge_document_review", "cancel_document_extraction", "create_page", "define_tag", "delete_attachment", "delete_page", "document_ocr_status", "export_page", "get_attachment", "get_attachment_upload_instructions", "get_deleted_page", "get_document", "get_document_content", "get_document_upload_instructions", "get_full_export", "get_page", "get_page_tree", "get_revision_diff", "import_page", "list_attachments", "list_documents", "list_pages", "list_revisions", "list_tag_definitions", "list_trash", "purge_page", "restore_page", "restore_revision", "retry_document_extraction", "search_knowledge", "search_pages", "semantic_index_status", "update_page"]);
   });
 });
 

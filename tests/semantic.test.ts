@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { SemanticSearchConfig } from "../src/config.ts";
+import type { DocumentRagConfig, SemanticSearchConfig } from "../src/config.ts";
 import { PageStore } from "../src/database.ts";
-import { chunkPage, hybridSearch, loadEmbeddedSqliteVec, OllamaEmbedder, SemanticIndexer } from "../src/semantic.ts";
+import { DocumentWorker } from "../src/documents.ts";
+import { chunkPage, hybridSearch, lexicalSearch, loadEmbeddedSqliteVec, OllamaEmbedder, SemanticIndexer } from "../src/semantic.ts";
 
 let dir = "";
 let store: PageStore | null = null;
@@ -31,6 +32,8 @@ afterEach(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 
+const documentConfig: DocumentRagConfig = { enabled: true, maxFileBytes: 10_000_000, maxExpandedBytes: 50_000_000, maxArchiveEntries: 10_000, maxCompressionRatio: 1000, maxPdfPages: 10_000, maxSpreadsheetCells: 5_000_000, ocrEnabled: false, tesseractCommand: "tesseract", pdfRendererCommand: "pdftoppm", ocrLanguages: ["spa", "eng"], ocrTimeoutSeconds: 120, maxOcrItems: 10_000, maxOcrOutputCharacters: 1_000_000 };
+
 describe("semantic indexing", () => {
   test("indexes queued pages and performs hybrid retrieval", async () => {
     const { db, config } = await setup();
@@ -47,6 +50,34 @@ describe("semantic indexing", () => {
     db.update(fruit.id, { body: "Apples are harvested from an updated orchard." }, "web");
     expect(db.semanticStatus(true, config.embeddingModel, 3).pendingPages).toBe(1);
     expect(await indexer.runUntilIdle()).toBe(1);
+  });
+
+  test("indexes document sections and returns citation-ready unified results", async () => {
+    const { db, config } = await setup();
+    const bytes = new TextEncoder().encode("Remote work policy requires manager approval for employee location changes.");
+    const document = db.createDocument("work-policy.txt", "text/plain", "text", bytes, "web", documentConfig.maxFileBytes);
+    await new DocumentWorker(db, documentConfig).runUntilIdle();
+    db.update(document.pageId, { tags: ["policy"], properties: { owner: "people" } }, "web");
+    const indexer = new SemanticIndexer(db, config);
+    expect(await indexer.runUntilIdle()).toBe(2);
+    expect(db.semanticStatus(true, config.embeddingModel, 3)).toMatchObject({ pendingDocuments: 0, indexedDocuments: 1 });
+
+    const lexical = lexicalSearch(db, "manager approval", [], null, 10, "published", {}, { source: "all", format: "text", hidden: false });
+    expect(lexical.hits).toHaveLength(1);
+    expect(lexical.hits![0]).toMatchObject({ source: "document", document: { documentId: document.id, filename: "work-policy.txt", locator: { label: "Part 1" } } });
+    expect(lexical.pages).toHaveLength(0);
+    expect(lexicalSearch(db, "manager", ["policy"], null, 10, "published", { owner: "people" }, { source: "documents" }).hits).toHaveLength(1);
+    expect(lexicalSearch(db, "manager", [], null, 10, "published", {}, { source: "documents", updatedAfter: "2999-01-01T00:00:00.000Z" }).hits).toEqual([]);
+
+    const hybrid = await hybridSearch(db, new OllamaEmbedder(config), "employee location rules", [], null, 10, "published", {}, undefined, { source: "all" });
+    expect(hybrid.hits?.some((hit) => hit.source === "document" && hit.document.documentId === document.id)).toBe(true);
+    expect(lexicalSearch(db, "manager approval", [], null, 10, "published", {}, { source: "documents", format: "pdf" }).hits).toEqual([]);
+
+    db.replaceDocument(document.id, "work-policy-v2.txt", "text/plain", "text", new TextEncoder().encode("Office attendance now requires two days each week."), documentConfig.maxFileBytes);
+    expect(lexicalSearch(db, "manager approval", [], null, 10, "published", {}, { source: "documents" }).hits).toEqual([]);
+    await new DocumentWorker(db, documentConfig).runUntilIdle();
+    expect(await indexer.runUntilIdle()).toBe(1);
+    expect(lexicalSearch(db, "office attendance", [], null, 10, "published", {}, { source: "documents" }).hits?.[0]).toMatchObject({ source: "document", document: { documentId: document.id, version: 2 } });
   });
 
   test("canonicalizes tag aliases and preserves a reusable taxonomy", async () => {

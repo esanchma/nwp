@@ -31,7 +31,7 @@ async function main(argv: string[]): Promise<void> {
   if (command === "worker") return workerCommand(argv.slice(1));
   if (command === "index") return indexCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") return printHelp();
-  if (command === "--version" || command === "-v") return console.log("nwp 0.11.0");
+  if (command === "--version" || command === "-v") return console.log("nwp 0.12.0");
   throw new Error(`unknown command '${command}'. Run 'nwp help'.`);
 }
 
@@ -386,6 +386,10 @@ async function searchCommand(argv: string[]): Promise<void> {
   if (mode) params.set("mode", mode);
   if (properties) params.set("properties", properties);
   if (limit) params.set("limit", limit);
+  for (const [option, parameter] of [["source", "source"], ["document", "document_id"], ["format", "format"], ["version", "version"], ["ocr-status", "ocr_status"], ["hidden", "hidden"], ["kind", "kind"], ["updated-after", "updated_after"], ["updated-before", "updated_before"]] as const) {
+    const value = optionalString(options, option);
+    if (value) params.set(parameter, value);
+  }
   const result = await apiRequest(endpoint, token, `/api/v1/search?${params}`, "GET");
   printResult(result, hasFlag(options, "json"));
 }
@@ -409,6 +413,15 @@ async function apiRequest(endpoint: string, token: string, path: string, method:
 function printResult(result: unknown, asJson: boolean): void {
   if (asJson) return console.log(JSON.stringify(result, null, 2));
   if (isPage(result)) return console.log(`${result.id}\t${result.alias}\t${result.title}`);
+  if (isObject(result) && Array.isArray(result.hits)) {
+    for (const hit of result.hits) {
+      if (!isObject(hit)) continue;
+      if (hit.source === "page" && isPage(hit.page)) console.log(`page\t${hit.page.id}\t${hit.page.alias}\t${hit.page.title}`);
+      if (hit.source === "document" && isObject(hit.document)) console.log(`document\t${String(hit.document.documentId ?? "")}\t${String(hit.document.sectionId ?? "")}\t${String(hit.document.filename ?? "")}\t${isObject(hit.document.locator) ? String(hit.document.locator.label ?? "") : ""}`);
+    }
+    if (result.nextCursor) console.error(`next cursor: ${result.nextCursor}`);
+    return;
+  }
   if (isObject(result) && Array.isArray(result.pages)) {
     for (const page of result.pages) if (isPage(page)) {
       const depthValue = (page as Record<string, unknown>).depth;
@@ -533,7 +546,7 @@ Usage:
   nwp page history ID [--limit N] [--cursor CURSOR] [--json]
   nwp page diff ID REVISION_ID [--json]
   nwp page restore ID REVISION_ID [--json]
-  nwp search [QUERY] [--mode hybrid|lexical] [--tags a,b] [--status STATUS|all] [--properties JSON] [--limit N] [--cursor CURSOR] [--json]
+  nwp search [QUERY] [--mode hybrid|lexical] [--source all|pages|documents] [--format FORMAT] [--document ID] [--version N] [--ocr-status STATUS] [--hidden true|false] [--kind KIND] [--updated-after ISO] [--updated-before ISO] [--tags a,b] [--status STATUS|all] [--properties JSON] [--limit N] [--cursor CURSOR] [--json]
   nwp tree [--status STATUS|all] [--json]
   nwp tag list
   nwp tag define --tag TAG --kind KIND [--name NAME] [--aliases LIST]

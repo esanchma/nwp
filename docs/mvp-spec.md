@@ -238,6 +238,8 @@ Version 0.10 delivers the first document-RAG foundation: content-addressed origi
 
 Version 0.11 adds optional local OCR. The durable worker invokes configurable Tesseract with Spanish and English language data for DOCX and PPTX images, and renders low-text PDF pages through configurable Poppler `pdftoppm`. OCR-derived sections retain image, slide, hidden-slide, part, and page locators. The database records `pending`, `completed`, `partial`, and `unavailable` states per document and version. Missing programs or language data preserve successful native extraction and allow later retry. Item-count, subprocess-time, and output-size guards bound OCR work; owner-only temporary directories are always removed.
 
+Version 0.12 indexes current document sections in FTS5 and sqlite-vec through a separate leased semantic queue. Unified reciprocal-rank fusion returns page or citation-ready document hits and suppresses the linked wiki page when its document evidence already matches. Replacement removes stale lexical and vector entries before indexing the new version. Filters cover source, document, format, version, OCR state, hidden state, section kind, update interval, linked-page tags, publication state, and typed properties. Web, REST/OpenAPI, CLI, and MCP expose the same retrieval behavior and preserve lexical fallback when Ollama or sqlite-vec is unavailable.
+
 ## Roadmap
 
 The following decisions describe the remaining product vision and do not expand the original MVP scope.

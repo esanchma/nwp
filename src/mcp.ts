@@ -6,7 +6,7 @@ import type { PageStore } from "./database.ts";
 import { compareRevision } from "./history.ts";
 import type { Attachment } from "./domain.ts";
 import { exportPageMarkdown, importPageMarkdown } from "./transfer.ts";
-import { hybridSearch, OllamaEmbedder } from "./semantic.ts";
+import { hybridSearch, lexicalSearch, OllamaEmbedder } from "./semantic.ts";
 import { ocrRuntimeStatus } from "./documents.ts";
 
 export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig): (request: Request) => Promise<Response> {
@@ -24,7 +24,7 @@ export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSear
 
 function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig): McpServer {
   const embedder = semanticConfig?.enabled ? new OllamaEmbedder(semanticConfig) : null;
-  const server = new McpServer({ name: "nwp", version: "0.11.0" });
+  const server = new McpServer({ name: "nwp", version: "0.12.0" });
   const statusSchema = z.enum(["draft", "published", "archived"]);
   const statusFilterSchema = z.enum(["draft", "published", "archived", "all"]);
   const propertiesSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]));
@@ -85,8 +85,28 @@ function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, d
       if (mode === "lexical" || !query.trim() || !embedder) return toolResult({ ...store.search(query, tags, cursor ?? null, limit, status, properties), mode: "lexical", ...(!embedder && mode === "hybrid" ? { warning: "Semantic search is disabled." } : {}) });
       const semanticState = store.semanticStatus(true, semanticConfig!.embeddingModel, semanticConfig!.embeddingDimensions);
       if (!semanticState.vectorAvailable || semanticState.indexedPages === 0) return toolResult({ ...store.search(query, tags, cursor ?? null, limit, status, properties), mode: "lexical", warning: "Semantic index is unavailable or empty." });
-      try { return toolResult(await hybridSearch(store, embedder, query, tags, cursor ?? null, limit, status, properties)); }
+      try { return toolResult(await hybridSearch(store, embedder, query, tags, cursor ?? null, limit, status, properties, undefined, { source: "pages" })); }
       catch (error) { return toolResult({ ...store.search(query, tags, null, limit, status, properties), mode: "lexical", warning: `Semantic search unavailable: ${error instanceof Error ? error.message : String(error)}` }); }
+    },
+  );
+
+  server.registerTool(
+    "search_knowledge",
+    {
+      description: "Search wiki pages and citation-ready document sections with hybrid retrieval and document facets",
+      inputSchema: {
+        query: z.string().default(""), tags: z.array(z.string()).default([]), cursor: z.string().optional(), limit: z.number().int().min(1).max(100).default(20), status: statusFilterSchema.default("published"), properties: propertiesSchema.default({}), mode: z.enum(["hybrid", "lexical"]).default("hybrid"),
+        source: z.enum(["all", "pages", "documents"]).default("all"), document_id: z.number().int().positive().optional(), format: z.enum(["docx", "xlsx", "pptx", "pdf", "markdown", "text"]).optional(), version: z.number().int().positive().optional(), ocr_status: z.enum(["not_required", "pending", "completed", "partial", "unavailable"]).optional(), hidden: z.boolean().optional(), kind: z.enum(["heading", "paragraph", "table", "slide", "notes", "sheet", "page", "image", "text"]).optional(), updated_after: z.string().datetime().optional(), updated_before: z.string().datetime().optional(),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ query, tags, cursor, limit, status, properties, mode, source, document_id, format, version, ocr_status, hidden, kind, updated_after, updated_before }) => {
+      const filters = { source, documentId: document_id, format, version, ocrStatus: ocr_status, hidden, kind, updatedAfter: updated_after, updatedBefore: updated_before };
+      if (mode === "lexical" || !query.trim() || !embedder) return toolResult({ ...lexicalSearch(store, query, tags, cursor ?? null, limit, status, properties, filters), ...(!embedder && mode === "hybrid" ? { warning: "Semantic search is disabled." } : {}) });
+      const state = store.semanticStatus(true, semanticConfig!.embeddingModel, semanticConfig!.embeddingDimensions);
+      if (!state.vectorAvailable || state.indexedPages + state.indexedDocuments === 0) return toolResult({ ...lexicalSearch(store, query, tags, cursor ?? null, limit, status, properties, filters), warning: "Semantic index is unavailable or empty." });
+      try { return toolResult(await hybridSearch(store, embedder, query, tags, cursor ?? null, limit, status, properties, undefined, filters)); }
+      catch (error) { return toolResult({ ...lexicalSearch(store, query, tags, null, limit, status, properties, filters), warning: `Semantic search unavailable: ${error instanceof Error ? error.message : String(error)}` }); }
     },
   );
 

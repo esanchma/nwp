@@ -99,8 +99,44 @@ export interface SearchResult extends PageSummary {
   excerpt: string;
 }
 
+export type SearchSource = "all" | "pages" | "documents";
+
+export interface DocumentSearchFilters {
+  source: SearchSource;
+  documentId?: number;
+  format?: DocumentFormat;
+  version?: number;
+  ocrStatus?: OcrStatus;
+  hidden?: boolean;
+  kind?: DocumentSectionKind;
+  updatedAfter?: string;
+  updatedBefore?: string;
+}
+
+export interface DocumentSearchResult {
+  sectionId: number;
+  ordinal: number;
+  documentId: number;
+  versionId: number;
+  version: number;
+  pageId: number;
+  filename: string;
+  format: DocumentFormat;
+  kind: DocumentSectionKind;
+  locator: DocumentLocator;
+  hidden: boolean;
+  ocrStatus: OcrStatus;
+  updatedAt: string;
+  excerpt: string;
+}
+
+export type SearchHit =
+  | { source: "page"; page: SearchResult }
+  | { source: "document"; document: DocumentSearchResult };
+
 export interface SearchResults {
   pages: SearchResult[];
+  hits?: SearchHit[];
   nextCursor: string | null;
   mode?: "lexical" | "hybrid";
   warning?: string;
@@ -214,6 +250,8 @@ export interface SemanticStatus {
   dimensions: number;
   pendingPages: number;
   indexedPages: number;
+  pendingDocuments: number;
+  indexedDocuments: number;
   lastError: string | null;
 }
 

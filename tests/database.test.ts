@@ -199,6 +199,11 @@ describe("PageStore", () => {
     original.db.run("DROP TABLE semantic_page_index");
     original.db.run("DROP TABLE semantic_index_config");
     original.db.run("DROP TABLE tag_aliases");
+    original.db.run("DROP TABLE document_section_search");
+    original.db.run("DROP TABLE document_chunk_embeddings");
+    original.db.run("DROP TABLE document_section_chunks");
+    original.db.run("DROP TABLE document_semantic_index");
+    original.db.run("DROP TABLE document_semantic_queue");
     original.db.run("DROP TABLE document_jobs");
     original.db.run("DROP TABLE document_sections");
     original.db.run("DROP TABLE document_versions");
