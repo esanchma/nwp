@@ -250,17 +250,17 @@ Version 0.16 adds exact complete-archive recovery. Export format 2 includes an i
 
 ## Roadmap
 
-The following decisions describe the remaining product vision and do not expand the original MVP scope.
+The following decisions describe the remaining product vision and do not expand the original MVP scope. Work proceeds in the priority order shown: user experience first, then portability, then operations.
 
-### Content and navigation
+### Priority 1: content and navigation
 
 - advanced preview and side-by-side editing;
 - richer navigation beyond the page tree and breadcrumbs.
 
-### Files and portability
+### Priority 2: files and portability
 
 - selective restore and cross-instance merge workflows.
 
-### Interfaces and operation
+### Priority 3: interfaces and operation
 
 - guided diagnostics and maintenance scheduling.
