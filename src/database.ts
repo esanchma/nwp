@@ -171,6 +171,7 @@ interface WebSnapshotRow {
   etag: string | null;
   last_modified: string | null;
   size: number;
+  assets_captured: number;
   fetched_at: string;
 }
 
@@ -657,6 +658,9 @@ const migrations = [
     );
     CREATE INDEX web_capture_assets_snapshot_idx ON web_capture_assets(snapshot_id, ordinal);
     CREATE INDEX web_capture_assets_blob_idx ON web_capture_assets(blob_sha256);
+  `,
+  `
+    ALTER TABLE web_capture_snapshots ADD COLUMN assets_captured INTEGER NOT NULL DEFAULT 0 CHECK (assets_captured IN (0, 1));
   `,
 ];
 
@@ -1397,7 +1401,7 @@ export class PageStore {
   claimWebCaptureTask(owner: string, leaseMilliseconds = 5 * 60_000): WebCaptureTask | null {
     const now = new Date();
     return this.db.transaction(() => {
-      const row = this.db.query<{ web_capture_id: number; page_id: number; url: string; final_url: string | null; etag: string | null; last_modified: string | null; revision: number }, [string, string]>("SELECT j.web_capture_id, wc.page_id, wc.url, wc.final_url, wc.etag, wc.last_modified, j.revision FROM web_capture_jobs j JOIN web_captures wc ON wc.id = j.web_capture_id JOIN pages p ON p.id = wc.page_id WHERE p.deleted_at IS NULL AND j.attempts < 3 AND j.available_at <= ? AND (j.lease_until IS NULL OR j.lease_until < ?) ORDER BY j.requested_at, j.web_capture_id LIMIT 1").get(now.toISOString(), now.toISOString());
+      const row = this.db.query<{ web_capture_id: number; page_id: number; url: string; final_url: string | null; etag: string | null; last_modified: string | null; revision: number }, [string, string]>("SELECT j.web_capture_id, wc.page_id, wc.url, wc.final_url, CASE WHEN COALESCE((SELECT assets_captured FROM web_capture_snapshots latest WHERE latest.web_capture_id = wc.id ORDER BY latest.id DESC LIMIT 1), 0) = 1 THEN wc.etag ELSE NULL END AS etag, CASE WHEN COALESCE((SELECT assets_captured FROM web_capture_snapshots latest WHERE latest.web_capture_id = wc.id ORDER BY latest.id DESC LIMIT 1), 0) = 1 THEN wc.last_modified ELSE NULL END AS last_modified, j.revision FROM web_capture_jobs j JOIN web_captures wc ON wc.id = j.web_capture_id JOIN pages p ON p.id = wc.page_id WHERE p.deleted_at IS NULL AND j.attempts < 3 AND j.available_at <= ? AND (j.lease_until IS NULL OR j.lease_until < ?) ORDER BY j.requested_at, j.web_capture_id LIMIT 1").get(now.toISOString(), now.toISOString());
       if (!row) return null;
       this.db.run("UPDATE web_capture_jobs SET lease_owner = ?, lease_until = ? WHERE web_capture_id = ? AND revision = ?", [owner, new Date(now.getTime() + leaseMilliseconds).toISOString(), row.web_capture_id, row.revision]);
       this.db.run("UPDATE web_captures SET status = 'fetching', updated_at = ? WHERE id = ?", [now.toISOString(), row.web_capture_id]);
@@ -1433,10 +1437,10 @@ export class PageStore {
     if (!humanEditedBefore && (pageBefore.title === webCapturePageTitle(task.url) || pageBefore.title === capture.title) && result.title) this.update(task.pageId, { title: result.title }, "web");
     const page = this.getById(task.pageId);
     const rawHash = this.ensureBlob(result.bytes, result.contentType, checkedAt);
-    const previousSnapshot = this.db.query<{ id: number; blob_sha256: string }, [number]>("SELECT id, blob_sha256 FROM web_capture_snapshots WHERE web_capture_id = ? ORDER BY id DESC LIMIT 1").get(task.webCaptureId);
+    const previousSnapshot = this.db.query<{ id: number; blob_sha256: string; assets_captured: number }, [number]>("SELECT id, blob_sha256, assets_captured FROM web_capture_snapshots WHERE web_capture_id = ? ORDER BY id DESC LIMIT 1").get(task.webCaptureId);
     const previousAssets = previousSnapshot ? this.db.query<{ ordinal: number; blob_sha256: string; source_url: string; alt_text: string }, [number]>("SELECT ordinal, blob_sha256, source_url, alt_text FROM web_capture_assets WHERE snapshot_id = ? ORDER BY ordinal").all(previousSnapshot.id) : [];
     const currentAssetIdentity = result.assets.map(({ ordinal, sha256, sourceUrl, alt }) => ({ ordinal, blob_sha256: sha256, source_url: sourceUrl, alt_text: alt }));
-    if (previousSnapshot?.blob_sha256 === rawHash && JSON.stringify(previousAssets) === JSON.stringify(currentAssetIdentity)) {
+    if (previousSnapshot?.assets_captured === 1 && previousSnapshot.blob_sha256 === rawHash && JSON.stringify(previousAssets) === JSON.stringify(currentAssetIdentity)) {
       this.db.transaction(() => {
         const current = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM web_capture_jobs WHERE web_capture_id = ?").get(task.webCaptureId);
         if (!current || current.revision !== task.revision || current.lease_owner !== task.owner) return;
@@ -1470,7 +1474,7 @@ export class PageStore {
           this.db.run("UPDATE documents SET filename = ?, status = 'queued', needs_ocr = 0, ocr_status = 'not_required', needs_review = ?, managed_title = ?, managed_body = ?, managed_tags_json = ?, managed_properties_json = ?, last_error = NULL, updated_at = ? WHERE id = ?", [filename, humanEditedBefore ? 1 : managed.needs_review, humanEditedBefore ? managed.managed_title : page.title, humanEditedBefore ? managed.managed_body : page.body, humanEditedBefore ? managed.managed_tags_json : JSON.stringify(page.tags), humanEditedBefore ? managed.managed_properties_json : JSON.stringify(page.properties), checkedAt, documentId]);
           this.db.run("INSERT INTO document_jobs(document_id, version_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, ?, 0, 1) ON CONFLICT(document_id) DO UPDATE SET version_id = excluded.version_id, requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = document_jobs.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [documentId, Number(version.lastInsertRowid), checkedAt, checkedAt]);
         }
-        const snapshot = this.db.run("INSERT INTO web_capture_snapshots(web_capture_id, blob_sha256, final_url, http_status, content_type, title, etag, last_modified, size, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [task.webCaptureId, rawHash, result.finalUrl, result.status, result.contentType, result.title, result.etag, result.lastModified, result.bytes.byteLength, checkedAt]);
+        const snapshot = this.db.run("INSERT INTO web_capture_snapshots(web_capture_id, blob_sha256, final_url, http_status, content_type, title, etag, last_modified, size, assets_captured, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)", [task.webCaptureId, rawHash, result.finalUrl, result.status, result.contentType, result.title, result.etag, result.lastModified, result.bytes.byteLength, checkedAt]);
         const snapshotId = Number(snapshot.lastInsertRowid);
         for (const asset of result.assets) this.db.run("INSERT INTO web_capture_assets(snapshot_id, ordinal, blob_sha256, source_url, final_url, filename, mime_type, alt_text, size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [snapshotId, asset.ordinal, asset.sha256, asset.sourceUrl, asset.finalUrl, asset.filename, asset.mimeType, asset.alt, asset.bytes.byteLength]);
         this.db.run("UPDATE web_captures SET document_id = ?, final_url = ?, status = 'ready', title = ?, content_type = ?, http_status = ?, etag = ?, last_modified = ?, last_error = NULL, fetched_at = ?, last_checked_at = ?, next_refresh_at = ?, updated_at = ? WHERE id = ?", [documentId, result.finalUrl, result.title, result.contentType, result.status, result.etag, result.lastModified, checkedAt, checkedAt, nextRefresh, checkedAt, task.webCaptureId]);
@@ -2201,7 +2205,7 @@ function hydrateResearch(row: ResearchRow): ResearchJob {
 }
 
 function hydrateWebSnapshot(row: WebSnapshotRow): WebCaptureSnapshot {
-  return { id: row.id, webCaptureId: row.web_capture_id, blobSha256: row.blob_sha256, finalUrl: row.final_url, httpStatus: row.http_status, contentType: row.content_type, title: row.title, etag: row.etag, lastModified: row.last_modified, size: row.size, fetchedAt: row.fetched_at };
+  return { id: row.id, webCaptureId: row.web_capture_id, blobSha256: row.blob_sha256, finalUrl: row.final_url, httpStatus: row.http_status, contentType: row.content_type, title: row.title, etag: row.etag, lastModified: row.last_modified, size: row.size, assetsCaptured: row.assets_captured === 1, fetchedAt: row.fetched_at };
 }
 
 function hydrateWebAsset(row: WebAssetRow): WebCaptureAsset {

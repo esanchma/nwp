@@ -299,6 +299,7 @@ export interface WebCaptureSnapshot {
   etag: string | null;
   lastModified: string | null;
   size: number;
+  assetsCaptured: boolean;
   fetchedAt: string;
 }
 

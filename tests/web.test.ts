@@ -97,6 +97,22 @@ describe("secure web capture", () => {
     expect(store.scheduleWebCapture(capture.id, null).refreshIntervalSeconds).toBeNull();
   });
 
+  test("forces one full refresh for legacy snapshots without asset processing", () => {
+    const capture = store.createWebCapture("https://example.com/legacy-assets", "rest");
+    const first = store.claimWebCaptureTask("legacy-owner-1")!;
+    const raw = new TextEncoder().encode("<p>legacy article</p>");
+    store.completeWebCaptureTask(first, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: raw, title: "Legacy", markdown: "# Legacy", assets: [], etag: '"legacy"', lastModified: "Wed, 01 Jan 2025 00:00:00 GMT" }, documentConfig.maxFileBytes);
+    const snapshot = store.listWebCaptureSnapshots(capture.id)[0]!;
+    store.db.run("UPDATE web_capture_snapshots SET assets_captured = 0 WHERE id = ?", [snapshot.id]);
+
+    store.refreshWebCapture(capture.id);
+    const refresh = store.claimWebCaptureTask("legacy-owner-2")!;
+    expect(refresh).toMatchObject({ etag: null, lastModified: null });
+    store.completeWebCaptureTask(refresh, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: raw, title: "Legacy", markdown: "# Legacy", assets: [], etag: '"legacy"', lastModified: "Wed, 01 Jan 2025 00:00:00 GMT" }, documentConfig.maxFileBytes);
+    expect(store.listWebCaptureSnapshots(capture.id)).toHaveLength(2);
+    expect(store.listWebCaptureSnapshots(capture.id)[0]?.assetsCaptured).toBe(true);
+  });
+
   test("creates a new immutable version when an interleaved image changes", () => {
     const capture = store.createWebCapture("https://example.com/illustrated", "rest");
     const html = new TextEncoder().encode("<p>stable article</p><img src='chart.png'>");
