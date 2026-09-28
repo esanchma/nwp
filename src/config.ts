@@ -41,6 +41,15 @@ export interface DocumentRagConfig {
   maxOcrOutputCharacters: number;
 }
 
+export interface WebCaptureConfig {
+  enabled: boolean;
+  timeoutSeconds: number;
+  maxRedirects: number;
+  maxResponseBytes: number;
+  maxExtractedCharacters: number;
+  userAgent: string;
+}
+
 export interface Config {
   host: string;
   port: number;
@@ -52,6 +61,7 @@ export interface Config {
   semanticSearch: SemanticSearchConfig;
   documentRag: DocumentRagConfig;
   ragAnswer: RagAnswerConfig;
+  webCapture: WebCaptureConfig;
 }
 
 export interface ConfigOverrides {
@@ -114,6 +124,15 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     maxAnswerCharacters: numberValue(answer.max_answer_characters, "rag_answer.max_answer_characters", 12_000),
     includeGeneralKnowledge: booleanValue(answer.include_general_knowledge, "rag_answer.include_general_knowledge", true),
   };
+  const web = objectValue(file.web_capture, "web_capture");
+  const webCapture: WebCaptureConfig = {
+    enabled: booleanValue(web.enabled, "web_capture.enabled", true),
+    timeoutSeconds: numberValue(web.timeout_seconds, "web_capture.timeout_seconds", 30),
+    maxRedirects: numberValue(web.max_redirects, "web_capture.max_redirects", 5),
+    maxResponseBytes: numberValue(web.max_response_bytes, "web_capture.max_response_bytes", 20 * 1024 * 1024),
+    maxExtractedCharacters: numberValue(web.max_extracted_characters, "web_capture.max_extracted_characters", 2_000_000),
+    userAgent: stringValue(web.user_agent, "web_capture.user_agent", "nwp/0.14 (+local knowledge capture)"),
+  };
   const documents = objectValue(file.document_rag, "document_rag");
   const documentRag: DocumentRagConfig = {
     enabled: booleanValue(documents.enabled, "document_rag.enabled", true),
@@ -140,6 +159,12 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
   }
   if (ragAnswer.maxPromptCharacters < ragAnswer.maxEvidenceCharacters) throw new Error("rag_answer.max_prompt_characters must not be smaller than max_evidence_characters");
 
+  for (const [name, value] of Object.entries({ timeout_seconds: webCapture.timeoutSeconds, max_redirects: webCapture.maxRedirects, max_response_bytes: webCapture.maxResponseBytes, max_extracted_characters: webCapture.maxExtractedCharacters })) {
+    if (!Number.isSafeInteger(value) || value < (name === "max_redirects" ? 0 : 1)) throw new Error(`web_capture.${name} must be ${name === "max_redirects" ? "a non-negative" : "a positive"} integer`);
+  }
+  if (webCapture.maxRedirects > 20) throw new Error("web_capture.max_redirects must not exceed 20");
+  if (webCapture.userAgent.length > 256 || /[\r\n]/.test(webCapture.userAgent)) throw new Error("web_capture.user_agent must be a single line of at most 256 characters");
+
   for (const [name, value] of Object.entries({ max_file_bytes: documentRag.maxFileBytes, max_expanded_bytes: documentRag.maxExpandedBytes, max_archive_entries: documentRag.maxArchiveEntries, max_compression_ratio: documentRag.maxCompressionRatio, max_pdf_pages: documentRag.maxPdfPages, max_spreadsheet_cells: documentRag.maxSpreadsheetCells, ocr_timeout_seconds: documentRag.ocrTimeoutSeconds, max_ocr_items: documentRag.maxOcrItems, max_ocr_output_characters: documentRag.maxOcrOutputCharacters })) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error(`document_rag.${name} must be a positive integer`);
   }
@@ -164,6 +189,7 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     semanticSearch,
     documentRag,
     ragAnswer,
+    webCapture,
   };
 }
 

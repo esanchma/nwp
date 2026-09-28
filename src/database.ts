@@ -44,8 +44,12 @@ import {
   type TagKind,
   type TrashList,
   type TreeEntry,
+  type WebCapture,
+  type WebCaptureSnapshot,
+  type WebCaptureStatus,
 } from "./domain.ts";
 import type { ExtractedDocument } from "./documents.ts";
+import type { FetchedWebPage } from "./web.ts";
 
 interface PageRow {
   id: number;
@@ -125,6 +129,22 @@ interface DocumentVersionRow {
   warnings_json: string;
   created_at: string;
   extracted_at: string | null;
+}
+
+interface WebCaptureRow {
+  id: number;
+  page_id: number;
+  document_id: number | null;
+  url: string;
+  final_url: string | null;
+  status: WebCaptureStatus;
+  title: string | null;
+  content_type: string | null;
+  http_status: number | null;
+  last_error: string | null;
+  fetched_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 interface RevisionRow {
@@ -487,6 +507,46 @@ const migrations = [
     FROM documents d JOIN document_versions dv ON dv.document_id = d.id
     WHERE d.status = 'ready' AND dv.version = (SELECT max(current.version) FROM document_versions current WHERE current.document_id = d.id);
   `,
+  `
+    CREATE TABLE web_captures (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      page_id INTEGER NOT NULL UNIQUE REFERENCES pages(id) ON DELETE CASCADE,
+      document_id INTEGER UNIQUE REFERENCES documents(id) ON DELETE SET NULL,
+      url TEXT NOT NULL UNIQUE,
+      final_url TEXT,
+      status TEXT NOT NULL CHECK (status IN ('queued', 'fetching', 'ready', 'failed', 'cancelled')),
+      title TEXT,
+      content_type TEXT,
+      http_status INTEGER,
+      last_error TEXT,
+      fetched_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX web_captures_status_idx ON web_captures(status, updated_at DESC);
+    CREATE TABLE web_capture_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      web_capture_id INTEGER NOT NULL REFERENCES web_captures(id) ON DELETE CASCADE,
+      blob_sha256 TEXT NOT NULL REFERENCES attachment_blobs(sha256),
+      final_url TEXT NOT NULL,
+      http_status INTEGER NOT NULL,
+      content_type TEXT NOT NULL,
+      title TEXT,
+      size INTEGER NOT NULL,
+      fetched_at TEXT NOT NULL
+    );
+    CREATE INDEX web_capture_snapshots_capture_idx ON web_capture_snapshots(web_capture_id, id DESC);
+    CREATE TABLE web_capture_jobs (
+      web_capture_id INTEGER PRIMARY KEY REFERENCES web_captures(id) ON DELETE CASCADE,
+      requested_at TEXT NOT NULL,
+      available_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      revision INTEGER NOT NULL DEFAULT 1,
+      lease_owner TEXT,
+      lease_until TEXT,
+      last_error TEXT
+    );
+  `,
 ];
 
 export interface SemanticIndexConfig {
@@ -501,6 +561,7 @@ export interface SemanticIndexTask { pageId: number; revision: number; page: Pag
 export interface DocumentSemanticTask { documentId: number; versionId: number; revision: number; owner: string; document: DocumentRecord | null; sections: DocumentSection[] }
 export interface DocumentChunkInput { sectionId: number; ordinal: number; content: string }
 export interface DocumentTask { documentId: number; versionId: number; revision: number; owner: string }
+export interface WebCaptureTask { webCaptureId: number; pageId: number; url: string; revision: number; owner: string }
 export interface SemanticNeighbor { pageId: number; chunkId: number; content: string; distance: number }
 export interface DocumentSemanticNeighbor extends DocumentSearchResult { chunkId: number; content: string; distance: number }
 
@@ -985,6 +1046,14 @@ export class PageStore {
     return this.db.query<DocumentVersionRow, []>(documentVersionSelect("1 = 1") + " ORDER BY dv.document_id, dv.version").all().map(toDocumentVersion);
   }
 
+  allWebCaptures(): WebCapture[] {
+    return this.db.query<WebCaptureRow, []>("SELECT * FROM web_captures ORDER BY id").all().map(hydrateWebCapture);
+  }
+
+  allWebCaptureSnapshots(): WebCaptureSnapshot[] {
+    return this.db.query<{ id: number; web_capture_id: number; blob_sha256: string; final_url: string; http_status: number; content_type: string; title: string | null; size: number; fetched_at: string }, []>("SELECT * FROM web_capture_snapshots ORDER BY web_capture_id, id").all().map((row) => ({ id: row.id, webCaptureId: row.web_capture_id, blobSha256: row.blob_sha256, finalUrl: row.final_url, httpStatus: row.http_status, contentType: row.content_type, title: row.title, size: row.size, fetchedAt: row.fetched_at }));
+  }
+
   attachmentFilePath(sha256: string): string {
     if (!/^[a-f0-9]{64}$/.test(sha256)) throw new AppError("invalid_attachment_hash", "attachment hash is invalid", 400);
     return this.pathForHash(sha256);
@@ -1026,6 +1095,127 @@ export class PageStore {
     };
     visit(null, 0);
     return result;
+  }
+
+  createWebCapture(url: string, source: ChangeSource): WebCapture {
+    if (this.db.query<{ id: number }, [string]>("SELECT id FROM web_captures WHERE url = ?").get(url)) throw new AppError("web_capture_exists", "this URL is already captured", 409);
+    const parsed = new URL(url);
+    const title = webCapturePageTitle(url);
+    const page = this.create({ title, body: `Source: ${url}`, tags: ["source:web", "type:web-capture"], properties: { "web.url": url } }, source);
+    const now = new Date().toISOString();
+    try {
+      const result = this.db.run("INSERT INTO web_captures(page_id, url, status, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?)", [page.id, url, now, now]);
+      const id = Number(result.lastInsertRowid);
+      this.db.run("INSERT INTO web_capture_jobs(web_capture_id, requested_at, available_at) VALUES (?, ?, ?)", [id, now, now]);
+      return this.getWebCapture(id);
+    } catch (error) {
+      this.db.run("DELETE FROM pages WHERE id = ?", [page.id]);
+      throw error;
+    }
+  }
+
+  getWebCapture(id: number): WebCapture {
+    if (!Number.isSafeInteger(id) || id < 1) throw new AppError("invalid_web_capture_id", "web capture ID is invalid", 400);
+    const row = this.db.query<WebCaptureRow, [number]>("SELECT wc.* FROM web_captures wc JOIN pages p ON p.id = wc.page_id WHERE wc.id = ? AND p.deleted_at IS NULL").get(id);
+    if (!row) throw new AppError("web_capture_not_found", "web capture not found", 404);
+    return hydrateWebCapture(row);
+  }
+
+  listWebCaptures(): WebCapture[] {
+    return this.db.query<WebCaptureRow, []>("SELECT wc.* FROM web_captures wc JOIN pages p ON p.id = wc.page_id WHERE p.deleted_at IS NULL ORDER BY wc.updated_at DESC, wc.id DESC").all().map(hydrateWebCapture);
+  }
+
+  webCaptureForPage(pageId: number): WebCapture | null {
+    const row = this.db.query<WebCaptureRow, [number]>("SELECT wc.* FROM web_captures wc JOIN pages p ON p.id = wc.page_id WHERE wc.page_id = ? AND p.deleted_at IS NULL").get(pageId);
+    return row ? hydrateWebCapture(row) : null;
+  }
+
+  listWebCaptureSnapshots(id: number): WebCaptureSnapshot[] {
+    this.getWebCapture(id);
+    return this.db.query<{ id: number; web_capture_id: number; blob_sha256: string; final_url: string; http_status: number; content_type: string; title: string | null; size: number; fetched_at: string }, [number]>("SELECT * FROM web_capture_snapshots WHERE web_capture_id = ? ORDER BY id DESC").all(id).map((row) => ({ id: row.id, webCaptureId: row.web_capture_id, blobSha256: row.blob_sha256, finalUrl: row.final_url, httpStatus: row.http_status, contentType: row.content_type, title: row.title, size: row.size, fetchedAt: row.fetched_at }));
+  }
+
+  claimWebCaptureTask(owner: string, leaseMilliseconds = 5 * 60_000): WebCaptureTask | null {
+    const now = new Date();
+    return this.db.transaction(() => {
+      const row = this.db.query<{ web_capture_id: number; page_id: number; url: string; revision: number }, [string, string]>("SELECT j.web_capture_id, wc.page_id, wc.url, j.revision FROM web_capture_jobs j JOIN web_captures wc ON wc.id = j.web_capture_id JOIN pages p ON p.id = wc.page_id WHERE p.deleted_at IS NULL AND j.attempts < 3 AND j.available_at <= ? AND (j.lease_until IS NULL OR j.lease_until < ?) ORDER BY j.requested_at, j.web_capture_id LIMIT 1").get(now.toISOString(), now.toISOString());
+      if (!row) return null;
+      this.db.run("UPDATE web_capture_jobs SET lease_owner = ?, lease_until = ? WHERE web_capture_id = ? AND revision = ?", [owner, new Date(now.getTime() + leaseMilliseconds).toISOString(), row.web_capture_id, row.revision]);
+      this.db.run("UPDATE web_captures SET status = 'fetching', updated_at = ? WHERE id = ?", [now.toISOString(), row.web_capture_id]);
+      return { webCaptureId: row.web_capture_id, pageId: row.page_id, url: row.url, revision: row.revision, owner };
+    }).immediate();
+  }
+
+  renewWebCaptureLease(task: WebCaptureTask, leaseMilliseconds = 5 * 60_000): boolean {
+    return this.db.run("UPDATE web_capture_jobs SET lease_until = ? WHERE web_capture_id = ? AND revision = ? AND lease_owner = ?", [new Date(Date.now() + leaseMilliseconds).toISOString(), task.webCaptureId, task.revision, task.owner]).changes === 1;
+  }
+
+  completeWebCaptureTask(task: WebCaptureTask, result: FetchedWebPage, maxDocumentBytes: number): void {
+    const lease = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM web_capture_jobs WHERE web_capture_id = ?").get(task.webCaptureId);
+    if (!lease || lease.revision !== task.revision || lease.lease_owner !== task.owner) return;
+    const markdownBytes = new TextEncoder().encode(result.markdown);
+    if (markdownBytes.byteLength > maxDocumentBytes) throw new AppError("document_too_large", `captured Markdown exceeds the technical ${maxDocumentBytes} byte guard`, 413);
+    const pageBefore = this.getById(task.pageId);
+    if (pageBefore.title === webCapturePageTitle(task.url) && result.title) this.update(task.pageId, { title: result.title }, "web");
+    const page = this.getById(task.pageId);
+    const now = new Date().toISOString();
+    const rawHash = this.ensureBlob(result.bytes, result.contentType, now);
+    const markdownHash = this.ensureBlob(markdownBytes, "text/markdown", now);
+    try {
+      const completed = this.db.transaction(() => {
+        const current = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM web_capture_jobs WHERE web_capture_id = ?").get(task.webCaptureId);
+        if (!current || current.revision !== task.revision || current.lease_owner !== task.owner) return false;
+        const filename = `${slugify(result.title) || `web-capture-${task.webCaptureId}`}.md`;
+        const document = this.db.run("INSERT INTO documents(page_id, filename, mime_type, format, status, managed_title, managed_body, managed_tags_json, managed_properties_json, created_at, updated_at) VALUES (?, ?, 'text/markdown', 'markdown', 'queued', ?, ?, ?, ?, ?, ?)", [task.pageId, filename, page.title, page.body, JSON.stringify(page.tags), JSON.stringify(page.properties), now, now]);
+        const documentId = Number(document.lastInsertRowid);
+        const version = this.db.run("INSERT INTO document_versions(document_id, version, blob_sha256, status, created_at) VALUES (?, 1, ?, 'queued', ?)", [documentId, markdownHash, now]);
+        this.db.run("INSERT INTO document_jobs(document_id, version_id, requested_at, available_at) VALUES (?, ?, ?, ?)", [documentId, Number(version.lastInsertRowid), now, now]);
+        this.db.run("INSERT INTO web_capture_snapshots(web_capture_id, blob_sha256, final_url, http_status, content_type, title, size, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [task.webCaptureId, rawHash, result.finalUrl, result.status, result.contentType, result.title, result.bytes.byteLength, now]);
+        this.db.run("UPDATE web_captures SET document_id = ?, final_url = ?, status = 'ready', title = ?, content_type = ?, http_status = ?, last_error = NULL, fetched_at = ?, updated_at = ? WHERE id = ?", [documentId, result.finalUrl, result.title, result.contentType, result.status, now, now, task.webCaptureId]);
+        this.db.run("DELETE FROM web_capture_jobs WHERE web_capture_id = ? AND revision = ?", [task.webCaptureId, task.revision]);
+        return true;
+      }).immediate();
+      if (!completed) {
+        if (this.removeBlobIfOrphaned(rawHash)) this.unlinkBlob(rawHash);
+        if (markdownHash !== rawHash && this.removeBlobIfOrphaned(markdownHash)) this.unlinkBlob(markdownHash);
+      }
+    } catch (error) {
+      if (this.removeBlobIfOrphaned(rawHash)) this.unlinkBlob(rawHash);
+      if (markdownHash !== rawHash && this.removeBlobIfOrphaned(markdownHash)) this.unlinkBlob(markdownHash);
+      throw error;
+    }
+  }
+
+  failWebCaptureTask(task: WebCaptureTask, message: string, retryable = true): void {
+    const row = this.db.query<{ attempts: number }, [number, number, string]>("SELECT attempts FROM web_capture_jobs WHERE web_capture_id = ? AND revision = ? AND lease_owner = ?").get(task.webCaptureId, task.revision, task.owner);
+    if (!row) return;
+    const attempts = retryable ? row.attempts + 1 : 3;
+    const failed = attempts >= 3;
+    this.db.transaction(() => {
+      this.db.run("UPDATE web_capture_jobs SET attempts = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, last_error = ? WHERE web_capture_id = ? AND revision = ?", [attempts, new Date(Date.now() + Math.min(60_000, 1000 * 2 ** attempts)).toISOString(), message.slice(0, 2000), task.webCaptureId, task.revision]);
+      this.db.run("UPDATE web_captures SET status = ?, last_error = ?, updated_at = ? WHERE id = ?", [failed ? "failed" : "queued", message.slice(0, 2000), new Date().toISOString(), task.webCaptureId]);
+    }).immediate();
+  }
+
+  cancelWebCapture(id: number): WebCapture {
+    const capture = this.getWebCapture(id);
+    if (capture.status !== "queued" && capture.status !== "fetching") throw new AppError("web_capture_not_running", "web capture is not queued or running", 409);
+    this.db.transaction(() => {
+      this.db.run("DELETE FROM web_capture_jobs WHERE web_capture_id = ?", [id]);
+      this.db.run("UPDATE web_captures SET status = 'cancelled', updated_at = ? WHERE id = ?", [new Date().toISOString(), id]);
+    }).immediate();
+    return this.getWebCapture(id);
+  }
+
+  retryWebCapture(id: number): WebCapture {
+    const capture = this.getWebCapture(id);
+    if (capture.status !== "failed" && capture.status !== "cancelled") throw new AppError("web_capture_not_retryable", "only failed or cancelled web captures can be retried", 409);
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.run("INSERT INTO web_capture_jobs(web_capture_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, 0, 1) ON CONFLICT(web_capture_id) DO UPDATE SET requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = web_capture_jobs.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [id, now, now]);
+      this.db.run("UPDATE web_captures SET status = 'queued', last_error = NULL, updated_at = ? WHERE id = ?", [now, id]);
+    }).immediate();
+    return this.getWebCapture(id);
   }
 
   createDocument(filenameValue: string, mimeTypeValue: string, format: DocumentFormat, bytes: Uint8Array, source: ChangeSource, maxBytes: number): DocumentRecord {
@@ -1321,6 +1511,8 @@ export class PageStore {
         [tombstoneAlias, current.alias, now, now, pageId],
       );
       this.db.run("DELETE FROM page_search WHERE page_id = ?", [pageId]);
+      this.db.run("DELETE FROM web_capture_jobs WHERE web_capture_id IN (SELECT id FROM web_captures WHERE page_id = ?)", [pageId]);
+      this.db.run("UPDATE web_captures SET status = 'cancelled', updated_at = ? WHERE page_id = ? AND status IN ('queued', 'fetching')", [now, pageId]);
       this.db.run("DELETE FROM document_jobs WHERE document_id IN (SELECT id FROM documents WHERE page_id = ?)", [pageId]);
       this.db.run("UPDATE document_versions SET status = 'cancelled' WHERE document_id IN (SELECT id FROM documents WHERE page_id = ?) AND status IN ('queued', 'extracting')", [pageId]);
       this.db.run("UPDATE documents SET status = 'cancelled', updated_at = ? WHERE page_id = ? AND status IN ('queued', 'extracting')", [now, pageId]);
@@ -1375,9 +1567,9 @@ export class PageStore {
 
   purgeDeleted(pageId: number): void {
     this.getDeletedById(pageId);
-    const hashes = this.db.query<{ sha256: string }, [number, number]>(
-      "SELECT blob_sha256 AS sha256 FROM page_attachments WHERE page_id = ? UNION SELECT dv.blob_sha256 AS sha256 FROM document_versions dv JOIN documents d ON d.id = dv.document_id WHERE d.page_id = ?",
-    ).all(pageId, pageId).map(({ sha256 }) => sha256);
+    const hashes = this.db.query<{ sha256: string }, [number, number, number]>(
+      "SELECT blob_sha256 AS sha256 FROM page_attachments WHERE page_id = ? UNION SELECT dv.blob_sha256 AS sha256 FROM document_versions dv JOIN documents d ON d.id = dv.document_id WHERE d.page_id = ? UNION SELECT ws.blob_sha256 AS sha256 FROM web_capture_snapshots ws JOIN web_captures wc ON wc.id = ws.web_capture_id WHERE wc.page_id = ?",
+    ).all(pageId, pageId, pageId).map(({ sha256 }) => sha256);
     const purge = this.db.transaction(() => {
       this.db.run("DELETE FROM document_section_search WHERE document_id IN (SELECT id FROM documents WHERE page_id = ?)", [pageId]);
       this.db.run("DELETE FROM pages WHERE id = ?", [pageId]);
@@ -1558,7 +1750,7 @@ export class PageStore {
   }
 
   private removeBlobIfOrphaned(sha256: string): boolean {
-    const referenced = this.db.query<{ found: number }, [string, string]>("SELECT 1 AS found FROM page_attachments WHERE blob_sha256 = ? UNION ALL SELECT 1 AS found FROM document_versions WHERE blob_sha256 = ? LIMIT 1").get(sha256, sha256);
+    const referenced = this.db.query<{ found: number }, [string, string, string]>("SELECT 1 AS found FROM page_attachments WHERE blob_sha256 = ? UNION ALL SELECT 1 AS found FROM document_versions WHERE blob_sha256 = ? UNION ALL SELECT 1 AS found FROM web_capture_snapshots WHERE blob_sha256 = ? LIMIT 1").get(sha256, sha256, sha256);
     if (referenced) return false;
     this.db.run("DELETE FROM attachment_blobs WHERE sha256 = ?", [sha256]);
     return true;
@@ -1584,6 +1776,16 @@ export class PageStore {
       [pageId],
     );
   }
+}
+
+function webCapturePageTitle(url: string): string {
+  const parsed = new URL(url);
+  const suffix = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/$/, "");
+  return `Web capture: ${parsed.hostname}${suffix}`.slice(0, 200);
+}
+
+function hydrateWebCapture(row: WebCaptureRow): WebCapture {
+  return { id: row.id, pageId: row.page_id, documentId: row.document_id, url: row.url, finalUrl: row.final_url, status: row.status, title: row.title, contentType: row.content_type, httpStatus: row.http_status, lastError: row.last_error, fetchedAt: row.fetched_at, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
 function documentSearchClauses(filters: DocumentSearchFilters, tags: string[], properties: PageProperties, status: PageStatus | "all"): { clauses: string[]; bindings: Array<string | number> } {

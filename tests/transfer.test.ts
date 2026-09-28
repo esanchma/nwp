@@ -64,6 +64,10 @@ describe("complete export", () => {
     db.deletePage(deleted.id);
     const attachment = db.addAttachment(active.id, "file.txt", "text/plain", new TextEncoder().encode("content"), null);
     const document = db.createDocument("source.txt", "text/plain", "text", new TextEncoder().encode("document source"), "web", 1_000_000);
+    const capture = db.createWebCapture("https://example.com/article", "web");
+    const webTask = db.claimWebCaptureTask("export-test")!;
+    db.completeWebCaptureTask(webTask, { requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: new TextEncoder().encode("<p>raw web source</p>"), title: "Article", markdown: "# Article\n\nweb source" }, 1_000_000);
+    const snapshot = db.listWebCaptureSnapshots(capture.id)[0]!;
 
     const archive = createFullExport(db);
     const compressed = Buffer.from(await new Response(archive.stream).arrayBuffer());
@@ -74,10 +78,12 @@ describe("complete export", () => {
     expect([...entries.keys()].some((name) => name.startsWith(`history/${active.id}/`))).toBe(true);
     expect(entries.get(`attachments/${attachment.sha256}`)?.toString()).toBe("content");
     expect(entries.get(`documents/${document.currentVersion.sha256}`)?.toString()).toBe("document source");
-    const manifest = JSON.parse(entries.get("manifest.json")!.toString()) as { format: string; attachments: unknown[]; documents: unknown[] };
+    expect(entries.get(`web/${snapshot.blobSha256}`)?.toString()).toBe("<p>raw web source</p>");
+    const manifest = JSON.parse(entries.get("manifest.json")!.toString()) as { format: string; attachments: unknown[]; documents: unknown[]; webCaptures: unknown[] };
     expect(manifest.format).toBe("nwp-export");
     expect(manifest.attachments).toHaveLength(1);
-    expect(manifest.documents).toHaveLength(1);
+    expect(manifest.documents).toHaveLength(2);
+    expect(manifest.webCaptures).toHaveLength(1);
   });
 });
 

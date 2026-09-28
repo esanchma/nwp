@@ -2,17 +2,18 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import { answerQuestion } from "./answer.ts";
-import type { DocumentRagConfig, RagAnswerConfig, SemanticSearchConfig } from "./config.ts";
+import type { DocumentRagConfig, RagAnswerConfig, SemanticSearchConfig, WebCaptureConfig } from "./config.ts";
 import type { PageStore } from "./database.ts";
 import { compareRevision } from "./history.ts";
 import type { Attachment } from "./domain.ts";
 import { exportPageMarkdown, importPageMarkdown } from "./transfer.ts";
 import { hybridSearch, lexicalSearch, OllamaEmbedder } from "./semantic.ts";
 import { ocrRuntimeStatus } from "./documents.ts";
+import { normalizeWebUrl } from "./web.ts";
 
-export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig, answerConfig?: RagAnswerConfig): (request: Request) => Promise<Response> {
+export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig, answerConfig?: RagAnswerConfig, webConfig?: WebCaptureConfig): (request: Request) => Promise<Response> {
   return async (request) => {
-    const server = createServer(store, semanticConfig, documentConfig, answerConfig);
+    const server = createServer(store, semanticConfig, documentConfig, answerConfig, webConfig);
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
@@ -23,9 +24,9 @@ export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSear
   };
 }
 
-function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig, answerConfig?: RagAnswerConfig): McpServer {
+function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig, answerConfig?: RagAnswerConfig, webConfig?: WebCaptureConfig): McpServer {
   const embedder = semanticConfig?.enabled ? new OllamaEmbedder(semanticConfig) : null;
-  const server = new McpServer({ name: "nwp", version: "0.13.0" });
+  const server = new McpServer({ name: "nwp", version: "0.14.0" });
   const statusSchema = z.enum(["draft", "published", "archived"]);
   const statusFilterSchema = z.enum(["draft", "published", "archived", "all"]);
   const propertiesSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]));
@@ -153,6 +154,39 @@ function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, d
     "semantic_index_status",
     { description: "Get semantic indexing availability and queue status", inputSchema: {}, annotations: { readOnlyHint: true } },
     async () => toolResult(store.semanticStatus(semanticConfig?.enabled ?? false, semanticConfig?.embeddingModel ?? "", semanticConfig?.embeddingDimensions ?? 0)),
+  );
+
+  server.registerTool(
+    "queue_web_capture",
+    { description: "Queue a durable capture of a public HTTP(S) page; private and reserved network destinations are blocked", inputSchema: { url: z.string().url() } },
+    async ({ url }) => {
+      if (!webConfig?.enabled || !documentConfig?.enabled) throw new Error("web capture and document ingestion must be enabled");
+      return toolResult(store.createWebCapture(normalizeWebUrl(url), "mcp"));
+    },
+  );
+
+  server.registerTool(
+    "list_web_captures",
+    { description: "List durable web captures and their processing status", inputSchema: {}, annotations: { readOnlyHint: true } },
+    async () => toolResult({ captures: store.listWebCaptures() }),
+  );
+
+  server.registerTool(
+    "get_web_capture",
+    { description: "Get one web capture and its retained raw snapshot metadata", inputSchema: { capture_id: z.number().int().positive() }, annotations: { readOnlyHint: true } },
+    async ({ capture_id }) => toolResult({ capture: store.getWebCapture(capture_id), snapshots: store.listWebCaptureSnapshots(capture_id) }),
+  );
+
+  server.registerTool(
+    "cancel_web_capture",
+    { description: "Cancel a queued or running web capture", inputSchema: { capture_id: z.number().int().positive() } },
+    async ({ capture_id }) => toolResult(store.cancelWebCapture(capture_id)),
+  );
+
+  server.registerTool(
+    "retry_web_capture",
+    { description: "Retry a failed or cancelled web capture", inputSchema: { capture_id: z.number().int().positive() } },
+    async ({ capture_id }) => toolResult(store.retryWebCapture(capture_id)),
   );
 
   server.registerTool(

@@ -96,6 +96,8 @@ export function createFullExport(store: PageStore): { stream: ReadableStream; fi
   const attachments = store.allAttachments();
   const documents = store.allDocuments();
   const documentVersions = store.allDocumentVersions();
+  const webCaptures = store.allWebCaptures();
+  const webSnapshots = store.allWebCaptureSnapshots();
   const taxonomy = store.listTagDefinitions();
   const generatedAt = new Date().toISOString();
   const pack = tar.pack();
@@ -113,6 +115,7 @@ export function createFullExport(store: PageStore): { stream: ReadableStream; fi
         revisions: revisions.map((revision) => ({ id: revision.id, pageId: revision.pageId, path: `history/${revision.pageId}/${revision.id}.md` })),
         attachments: attachments.map((attachment) => ({ ...attachment, path: `attachments/${attachment.sha256}` })),
         documents: documents.map((document) => ({ ...document, versions: documentVersions.filter((version) => version.documentId === document.id).map((version) => ({ ...version, path: `documents/${version.sha256}` })) })),
+        webCaptures: webCaptures.map((capture) => ({ ...capture, snapshots: webSnapshots.filter((snapshot) => snapshot.webCaptureId === capture.id).map((snapshot) => ({ ...snapshot, path: `web/${snapshot.blobSha256}` })) })),
         taxonomy,
       };
       await addBuffer(pack, "manifest.json", `${JSON.stringify(manifest, null, 2)}\n`);
@@ -124,6 +127,9 @@ export function createFullExport(store: PageStore): { stream: ReadableStream; fi
       }
       for (const hash of new Set(documentVersions.map(({ sha256 }) => sha256))) {
         await addFile(pack, `documents/${hash}`, store.attachmentFilePath(hash));
+      }
+      for (const hash of new Set(webSnapshots.map(({ blobSha256 }) => blobSha256))) {
+        await addFile(pack, `web/${hash}`, store.attachmentFilePath(hash));
       }
       pack.finalize();
     } catch (error) {

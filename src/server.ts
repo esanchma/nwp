@@ -14,11 +14,12 @@ import { openApiJson } from "./openapi.ts";
 import { createFullExport, exportPageMarkdown, importPageMarkdown } from "./transfer.ts";
 import { hybridSearch, lexicalSearch, OllamaEmbedder } from "./semantic.ts";
 import { canonicalDocumentMime, documentFormat, ocrRuntimeStatus } from "./documents.ts";
+import { normalizeWebUrl } from "./web.ts";
 
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024 + 64 * 1024;
 
 export async function createRequestHandler(store: PageStore, config: Config, apiToken: string): Promise<(request: Request) => Promise<Response>> {
-  const handleMcp = await createMcpHandler(store, config.semanticSearch, config.documentRag, config.ragAnswer);
+  const handleMcp = await createMcpHandler(store, config.semanticSearch, config.documentRag, config.ragAnswer, config.webCapture);
   const embedder = config.semanticSearch.enabled ? new OllamaEmbedder(config.semanticSearch) : null;
   const allowedHosts = new Set([`${config.host}:${config.port}`, `localhost:${config.port}`, `127.0.0.1:${config.port}`]);
 
@@ -82,8 +83,24 @@ async function apiRoute(request: Request, url: URL, store: PageStore, config: Co
   const documentReviewMatch = /^\/api\/v1\/documents\/(\d+)\/review$/.exec(url.pathname);
   const documentCancelMatch = /^\/api\/v1\/documents\/(\d+)\/cancel$/.exec(url.pathname);
   const documentRetryMatch = /^\/api\/v1\/documents\/(\d+)\/retry$/.exec(url.pathname);
+  const webCaptureMatch = /^\/api\/v1\/web-captures\/(\d+)$/.exec(url.pathname);
+  const webCaptureCancelMatch = /^\/api\/v1\/web-captures\/(\d+)\/cancel$/.exec(url.pathname);
+  const webCaptureRetryMatch = /^\/api\/v1\/web-captures\/(\d+)\/retry$/.exec(url.pathname);
 
   if (request.method === "GET" && url.pathname === "/api/v1/openapi.json") return openApiResponse();
+  if (request.method === "GET" && url.pathname === "/api/v1/web-captures") return json({ captures: store.listWebCaptures() });
+  if (request.method === "POST" && url.pathname === "/api/v1/web-captures") {
+    if (!config.webCapture.enabled || !config.documentRag.enabled) throw new AppError("web_capture_disabled", "web capture and document ingestion must be enabled", 503);
+    const value = await readJson(request);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new AppError("invalid_web_capture", "request body must be an object", 400);
+    const body = value as Record<string, unknown>;
+    if (Object.keys(body).some((key) => key !== "url")) throw new AppError("invalid_web_capture", "only url is accepted", 400);
+    if (typeof body.url !== "string") throw new AppError("invalid_web_url", "url is required", 400);
+    return json(store.createWebCapture(normalizeWebUrl(body.url), apiSource(request)), 202);
+  }
+  if (request.method === "GET" && webCaptureMatch) { const id = Number(webCaptureMatch[1]); return json({ capture: store.getWebCapture(id), snapshots: store.listWebCaptureSnapshots(id) }); }
+  if (request.method === "POST" && webCaptureCancelMatch) return json(store.cancelWebCapture(Number(webCaptureCancelMatch[1])));
+  if (request.method === "POST" && webCaptureRetryMatch) return json(store.retryWebCapture(Number(webCaptureRetryMatch[1])));
   if (request.method === "GET" && url.pathname === "/api/v1/documents/ocr/status") return json(await ocrRuntimeStatus(config.documentRag));
   if (request.method === "GET" && url.pathname === "/api/v1/documents") return json({ documents: store.listDocuments() });
   if (request.method === "POST" && url.pathname === "/api/v1/documents") {
@@ -269,6 +286,17 @@ async function webRoute(request: Request, url: URL, store: PageStore, config: Co
   if (request.method === "GET" && url.pathname === "/api-docs/init.js") return staticAssetResponse(swaggerUiInitializer, "text/javascript; charset=utf-8");
   if (request.method === "GET" && url.pathname === "/openapi.json") return openApiResponse();
   if (request.method === "GET" && url.pathname === "/export/all") return fullExportResponse(store);
+  if (request.method === "GET" && url.pathname === "/web-captures") {
+    const items = store.listWebCaptures().map((capture) => `<li><a href="/wiki/${encodeURIComponent(store.getById(capture.pageId).alias)}">${escapeHtml(capture.title ?? capture.url)}</a><small>${escapeHtml(capture.status)} · ${escapeHtml(capture.finalUrl ?? capture.url)}${capture.lastError ? ` · ${escapeHtml(capture.lastError)}` : ""}</small></li>`).join("");
+    return html(layout("Web captures", `<h1>Web captures</h1><form method="post" action="/web-captures"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Public HTTP(S) URL<input type="url" name="url" required placeholder="https://example.com/article"></label><button type="submit">Queue capture</button></form>${items ? `<ul class="page-list">${items}</ul>` : "<p>No web captures yet.</p>"}`, csrf), 200, headers);
+  }
+  if (request.method === "POST" && url.pathname === "/web-captures") {
+    await verifyCsrf(request);
+    if (!config.webCapture.enabled || !config.documentRag.enabled) throw new AppError("web_capture_disabled", "web capture and document ingestion must be enabled", 503);
+    const form = await request.formData();
+    const capture = store.createWebCapture(normalizeWebUrl(String(form.get("url") ?? "")), "web");
+    return redirect(`/wiki/${encodeURIComponent(store.getById(capture.pageId).alias)}`);
+  }
   if (request.method === "GET" && url.pathname === "/documents") {
     const items = store.listDocuments().map((document) => `<li><a href="/wiki/${encodeURIComponent(store.getById(document.pageId).alias)}">${escapeHtml(document.filename)}</a><small>${escapeHtml(document.format.toUpperCase())} · version ${document.currentVersion.version} · ${escapeHtml(document.status)} · OCR ${escapeHtml(document.ocrStatus)}${document.needsOcr ? " (pending)" : ""}</small></li>`).join("");
     return html(layout("Documents", `<div class="title-row"><h1>Documents</h1><a class="button" href="/documents/import">Import document</a></div>${items ? `<ul class="page-list">${items}</ul>` : "<p>No documents yet.</p>"}`, csrf), 200, headers);
@@ -287,6 +315,12 @@ async function webRoute(request: Request, url: URL, store: PageStore, config: Co
     const format = documentFormat(file.name, file.type);
     const document = store.createDocument(file.name, canonicalDocumentMime(format), format, new Uint8Array(await file.arrayBuffer()), "web", config.documentRag.maxFileBytes);
     return redirect(`/wiki/${encodeURIComponent(store.getById(document.pageId).alias)}`);
+  }
+  const webCaptureJobMatch = /^\/web-captures\/(\d+)\/(cancel|retry)$/.exec(url.pathname);
+  if (request.method === "POST" && webCaptureJobMatch) {
+    await verifyCsrf(request);
+    const capture = webCaptureJobMatch[2] === "cancel" ? store.cancelWebCapture(Number(webCaptureJobMatch[1])) : store.retryWebCapture(Number(webCaptureJobMatch[1]));
+    return redirect(`/wiki/${encodeURIComponent(store.getById(capture.pageId).alias)}`);
   }
   const documentJobWebMatch = /^\/documents\/(\d+)\/(cancel|retry)$/.exec(url.pathname);
   if (request.method === "POST" && documentJobWebMatch) {
@@ -489,6 +523,8 @@ function pageView(page: Page, store: PageStore, csrf: string): string {
   const breadcrumbs = page.breadcrumbs.map((crumb) => `<a href="/wiki/${encodeURIComponent(crumb.alias)}">${escapeHtml(crumb.title)}</a>`).join(" <span aria-hidden=\"true\">›</span> ");
   const properties = Object.entries(page.properties).map(([key, value]) => `<tr><th>${escapeHtml(key)}</th><td><code>${escapeHtml(JSON.stringify(value))}</code></td></tr>`).join("");
   const backlinks = page.backlinks.map((link) => `<li><a href="/wiki/${encodeURIComponent(link.alias)}">${escapeHtml(link.title)}</a></li>`).join("");
+  const webCapture = store.webCaptureForPage(page.id);
+  const webCaptureContent = webCapture ? `<aside><h2>Web source</h2><p><a href="${escapeHtml(webCapture.finalUrl ?? webCapture.url)}" rel="noreferrer">${escapeHtml(webCapture.finalUrl ?? webCapture.url)}</a></p><p>Status: <strong>${escapeHtml(webCapture.status)}</strong>${webCapture.fetchedAt ? ` · captured ${formatDate(webCapture.fetchedAt)}` : ""}</p>${webCapture.lastError ? `<p class="error">${escapeHtml(webCapture.lastError)}</p>` : ""}${webCapture.status === "queued" || webCapture.status === "fetching" ? `<form method="post" action="/web-captures/${webCapture.id}/cancel"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button class="secondary" type="submit">Cancel capture</button></form>` : webCapture.status === "failed" || webCapture.status === "cancelled" ? `<form method="post" action="/web-captures/${webCapture.id}/retry"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button class="secondary" type="submit">Retry capture</button></form>` : ""}</aside>` : "";
   const document = store.documentForPage(page.id);
   const documentContent = document ? documentView(document, store, csrf) : "";
   const attachments = store.listAttachments(page.id);
@@ -501,6 +537,7 @@ function pageView(page: Page, store: PageStore, csrf: string): string {
     ${breadcrumbs ? `<nav class="breadcrumbs" aria-label="Breadcrumb">${breadcrumbs}</nav>` : ""}
     <header class="page-header"><div><h1>${escapeHtml(page.title)} <span class="status status-${page.status}">${page.status}</span></h1>${tags ? `<div class="tags">${tags}</div>` : ""}</div><div class="page-actions"><a class="button secondary" href="/wiki/${encodeURIComponent(page.alias)}/history">History</a><a class="button secondary" href="/wiki/${encodeURIComponent(page.alias)}/export">Export</a><a class="button secondary" href="/wiki/${encodeURIComponent(page.alias)}/edit">Edit</a><a class="button danger" href="/wiki/${encodeURIComponent(page.alias)}/delete">Delete</a></div></header>
     <div class="markdown">${content || "<p><em>This page is empty.</em></p>"}</div>
+    ${webCaptureContent}
     ${documentContent}
     ${properties ? `<details class="properties"><summary>Properties</summary><table>${properties}</table></details>` : ""}
   </article>
@@ -639,7 +676,7 @@ function formPage(form: FormData) {
 }
 
 function layout(title: string, body: string, csrf: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="csrf-token" content="${escapeHtml(csrf)}"><link rel="icon" href="/logo.svg" type="image/svg+xml"><title>${escapeHtml(title)} · nwp</title><style>${CSS}</style></head><body><header class="site-header"><nav><a class="brand" href="/"><img src="/logo.svg" width="34" height="34" alt="">nwp</a><form class="nav-search" action="/search" method="get"><label class="sr-only" for="nav-query">Search pages</label><input id="nav-query" type="search" name="q" placeholder="Search" aria-label="Search pages"></form><a href="/pages">Pages</a><a href="/tree">Tree</a><a href="/tags">Tags</a><a href="/taxonomy">Taxonomy</a><a href="/documents">Documents</a><a href="/answer">Answer</a><a href="/trash">Trash</a><a href="/api-docs">API</a><a href="/import">Import</a><a href="/export/all">Export all</a><a class="button" href="/new">New page</a></nav></header><main>${body}</main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="csrf-token" content="${escapeHtml(csrf)}"><link rel="icon" href="/logo.svg" type="image/svg+xml"><title>${escapeHtml(title)} · nwp</title><style>${CSS}</style></head><body><header class="site-header"><nav><a class="brand" href="/"><img src="/logo.svg" width="34" height="34" alt="">nwp</a><form class="nav-search" action="/search" method="get"><label class="sr-only" for="nav-query">Search pages</label><input id="nav-query" type="search" name="q" placeholder="Search" aria-label="Search pages"></form><a href="/pages">Pages</a><a href="/tree">Tree</a><a href="/tags">Tags</a><a href="/taxonomy">Taxonomy</a><a href="/documents">Documents</a><a href="/web-captures">Web</a><a href="/answer">Answer</a><a href="/trash">Trash</a><a href="/api-docs">API</a><a href="/import">Import</a><a href="/export/all">Export all</a><a class="button" href="/new">New page</a></nav></header><main>${body}</main></body></html>`;
 }
 
 const CSS = `

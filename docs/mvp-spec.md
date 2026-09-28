@@ -242,6 +242,8 @@ Version 0.12 indexes current document sections in FTS5 and sqlite-vec through a 
 
 Version 0.13 adds synchronous citation-grounded answers through configurable Ollama generation, with `qwen3:8b` as the default. Retrieval produces application-owned evidence IDs and precise viewer links. The model receives document content only as untrusted quoted data, cannot choose arbitrary citations, and must cite every evidence-backed sentence or bullet. Strict structured output, citation validation, one bounded repair attempt, and safe abstention prevent malformed or unsupported answers from reaching users. General model knowledge is optional and returned in a separate labeled field. Web, REST/OpenAPI, CLI, and MCP expose the same answer contract.
 
+Version 0.14 adds durable public-web capture. A leased SQLite worker fetches HTTP(S) pages, retains immutable content-addressed raw snapshots, creates bounded Markdown documents, and reuses document extraction and semantic indexing for search and cited answers. SSRF controls reject credentials and non-public destinations, validate every DNS answer and redirect, pin the validated address, and enforce content-type, compression, redirect, timeout, byte, and character guards. Captures have linked wiki pages, cancellation, retry, provenance metadata, complete-export coverage, and web, REST/OpenAPI, CLI, and MCP interfaces. Browser-rendered and authenticated sources remain outside this release.
+
 ## Roadmap
 
 The following decisions describe the remaining product vision and do not expand the original MVP scope.

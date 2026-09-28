@@ -14,7 +14,7 @@ export const openApiDocument = {
   openapi: "3.1.0",
   info: {
     title: "nwp JSON API",
-    version: "0.13.0",
+    version: "0.14.0",
     description: "Local API for nano-wiki-pi. SQLite metadata is authoritative and every endpoint requires the generated Bearer token.",
     license: { name: "MIT", identifier: "MIT" },
   },
@@ -22,7 +22,7 @@ export const openApiDocument = {
   security: [{ bearerAuth: [] }],
   tags: [
     { name: "Pages" }, { name: "Search" }, { name: "History" }, { name: "Trash" },
-    { name: "Attachments" }, { name: "Documents" }, { name: "Transfer" }, { name: "Taxonomy" }, { name: "Semantic" }, { name: "Contract" },
+    { name: "Attachments" }, { name: "Documents" }, { name: "Web captures" }, { name: "Transfer" }, { name: "Taxonomy" }, { name: "Semantic" }, { name: "Contract" },
   ],
   paths: {
     "/openapi.json": {
@@ -59,6 +59,22 @@ export const openApiDocument = {
     },
     "/semantic/status": {
       get: { tags: ["Semantic"], operationId: "getSemanticStatus", summary: "Get semantic extension and indexing queue status", responses: { "200": response("Semantic status", ref("SemanticStatus")), ...errorResponses } },
+    },
+    "/web-captures": {
+      get: { tags: ["Web captures"], operationId: "listWebCaptures", summary: "List durable web captures", responses: { "200": response("Web capture list", { type: "object", required: ["captures"], properties: { captures: { type: "array", items: ref("WebCapture") } } }), ...errorResponses } },
+      post: { tags: ["Web captures"], operationId: "queueWebCapture", summary: "Queue a public HTTP(S) page for secure capture", requestBody: { required: true, content: json({ type: "object", additionalProperties: false, required: ["url"], properties: { url: { type: "string", format: "uri" } } }) }, responses: { "202": response("Queued web capture", ref("WebCapture")), ...errorResponses } },
+    },
+    "/web-captures/{webCaptureId}": {
+      parameters: [{ $ref: "#/components/parameters/WebCaptureId" }],
+      get: { tags: ["Web captures"], operationId: "getWebCapture", summary: "Get capture and retained snapshot metadata", responses: { "200": response("Web capture detail", { type: "object", required: ["capture", "snapshots"], properties: { capture: ref("WebCapture"), snapshots: { type: "array", items: ref("WebCaptureSnapshot") } } }), ...errorResponses } },
+    },
+    "/web-captures/{webCaptureId}/cancel": {
+      parameters: [{ $ref: "#/components/parameters/WebCaptureId" }],
+      post: { tags: ["Web captures"], operationId: "cancelWebCapture", summary: "Cancel queued or running capture", responses: { "200": response("Cancelled web capture", ref("WebCapture")), ...errorResponses } },
+    },
+    "/web-captures/{webCaptureId}/retry": {
+      parameters: [{ $ref: "#/components/parameters/WebCaptureId" }],
+      post: { tags: ["Web captures"], operationId: "retryWebCapture", summary: "Retry a failed or cancelled capture", responses: { "200": response("Queued web capture", ref("WebCapture")), ...errorResponses } },
     },
     "/documents/ocr/status": {
       get: { tags: ["Documents"], operationId: "getDocumentOcrStatus", summary: "Check local Tesseract and PDF renderer availability", responses: { "200": response("OCR runtime status", ref("OcrRuntimeStatus")), ...errorResponses } },
@@ -210,13 +226,14 @@ export const openApiDocument = {
       RevisionId: { name: "revisionId", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
       AttachmentId: { name: "attachmentId", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
       DocumentId: { name: "documentId", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
+      WebCaptureId: { name: "webCaptureId", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
       Cursor: { name: "cursor", in: "query", schema: { type: "string" } },
       Limit: { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 50 } },
       StatusFilter: { name: "status", in: "query", schema: { type: "string", enum: ["draft", "published", "archived", "all"], default: "published" } },
     },
     responses: {
       BadRequest: response("Invalid request", ref("Error")), Unauthorized: response("Missing or invalid Bearer token", ref("Error")),
-      NotFound: response("Resource not found", ref("Error")), Conflict: response("Resource conflict", ref("Error")), TooLarge: response("Request exceeds configured limits", ref("Error")), ServiceUnavailable: response("Required local model capability is unavailable", ref("Error")),
+      NotFound: response("Resource not found", ref("Error")), Conflict: response("Resource conflict", ref("Error")), TooLarge: response("Request exceeds configured limits", ref("Error")), ServiceUnavailable: response("Required local capability is unavailable", ref("Error")),
     },
     schemas: {
       PageStatus: { type: "string", enum: ["draft", "published", "archived"] },
@@ -253,6 +270,8 @@ export const openApiDocument = {
       SemanticStatus: { type: "object", required: ["enabled", "vectorAvailable", "model", "dimensions", "pendingPages", "indexedPages", "pendingDocuments", "indexedDocuments", "lastError"], properties: { enabled: { type: "boolean" }, vectorAvailable: { type: "boolean" }, model: { type: "string" }, dimensions: { type: "integer" }, pendingPages: { type: "integer" }, indexedPages: { type: "integer" }, pendingDocuments: { type: "integer" }, indexedDocuments: { type: "integer" }, lastError: { type: ["string", "null"] } } },
       OcrStatus: { type: "string", enum: ["not_required", "pending", "completed", "partial", "unavailable"] },
       OcrRuntimeStatus: { type: "object", required: ["enabled", "available", "pdfRendererAvailable", "tesseractCommand", "pdfRendererCommand", "languages", "tesseractError", "pdfRendererError"], properties: { enabled: { type: "boolean" }, available: { type: "boolean" }, pdfRendererAvailable: { type: "boolean" }, tesseractCommand: { type: "string" }, pdfRendererCommand: { type: "string" }, languages: { type: "array", items: { type: "string" } }, tesseractError: { type: ["string", "null"] }, pdfRendererError: { type: ["string", "null"] } } },
+      WebCapture: { type: "object", required: ["id", "pageId", "documentId", "url", "finalUrl", "status", "title", "contentType", "httpStatus", "lastError", "fetchedAt", "createdAt", "updatedAt"], properties: { id: { type: "integer" }, pageId: { type: "integer" }, documentId: { type: ["integer", "null"] }, url: { type: "string", format: "uri" }, finalUrl: { type: ["string", "null"], format: "uri" }, status: { type: "string", enum: ["queued", "fetching", "ready", "failed", "cancelled"] }, title: { type: ["string", "null"] }, contentType: { type: ["string", "null"] }, httpStatus: { type: ["integer", "null"] }, lastError: { type: ["string", "null"] }, fetchedAt: { type: ["string", "null"], format: "date-time" }, createdAt: { type: "string", format: "date-time" }, updatedAt: { type: "string", format: "date-time" } } },
+      WebCaptureSnapshot: { type: "object", required: ["id", "webCaptureId", "blobSha256", "finalUrl", "httpStatus", "contentType", "title", "size", "fetchedAt"], properties: { id: { type: "integer" }, webCaptureId: { type: "integer" }, blobSha256: { type: "string", pattern: "^[a-f0-9]{64}$" }, finalUrl: { type: "string", format: "uri" }, httpStatus: { type: "integer" }, contentType: { type: "string" }, title: { type: ["string", "null"] }, size: { type: "integer", minimum: 0 }, fetchedAt: { type: "string", format: "date-time" } } },
       DocumentVersion: { type: "object", required: ["id", "documentId", "version", "sha256", "size", "status", "parserVersion", "metadata", "ocrStatus", "warnings", "createdAt", "extractedAt"], properties: { id: { type: "integer" }, documentId: { type: "integer" }, version: { type: "integer" }, sha256: { type: "string", pattern: "^[a-f0-9]{64}$" }, size: { type: "integer" }, status: { type: "string", enum: ["queued", "extracting", "ready", "failed", "cancelled", "superseded"] }, parserVersion: { type: ["string", "null"] }, metadata: { type: "object", additionalProperties: ref("Scalar") }, ocrStatus: ref("OcrStatus"), warnings: { type: "array", items: { type: "string" } }, createdAt: { type: "string", format: "date-time" }, extractedAt: { type: ["string", "null"], format: "date-time" } } },
       Document: { type: "object", required: ["id", "pageId", "filename", "mimeType", "format", "status", "needsOcr", "ocrStatus", "needsReview", "lastError", "createdAt", "updatedAt", "currentVersion"], properties: { id: { type: "integer" }, pageId: { type: "integer" }, filename: { type: "string" }, mimeType: { type: "string" }, format: { type: "string", enum: ["docx", "xlsx", "pptx", "pdf", "markdown", "text"] }, status: { type: "string", enum: ["queued", "extracting", "ready", "failed", "cancelled"] }, needsOcr: { type: "boolean" }, ocrStatus: ref("OcrStatus"), needsReview: { type: "boolean" }, lastError: { type: ["string", "null"] }, createdAt: { type: "string", format: "date-time" }, updatedAt: { type: "string", format: "date-time" }, currentVersion: ref("DocumentVersion") } },
       DocumentLocator: { type: "object", required: ["label"], properties: { label: { type: "string" }, page: { type: "integer" }, slide: { type: "integer" }, sheet: { type: "string" }, range: { type: "string" }, heading: { type: "string" }, image: { type: "string" }, part: { type: "string" } } },

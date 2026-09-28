@@ -2,7 +2,7 @@
 
 nwp (nano-wiki-pi) is a small local wiki for people and development agents. It provides a server-rendered web interface, a CLI, and MCP tools over one SQLite database.
 
-nwp supports page creation, reading, listing, editing, hybrid full-text and semantic search, durable document extraction with local OCR, citation-grounded answers, revision history, restoration, a recoverable trash, deduplicated file attachments, publication states, custom properties, parent-child navigation, and portable import/export. Pages use GitHub Flavored Markdown, `[[wiki-links]]`, backlinks, and tags. nwp stores a complete snapshot before each meaningful edit.
+nwp supports page creation, reading, listing, editing, hybrid full-text and semantic search, durable document extraction with local OCR, secure durable web capture, citation-grounded answers, revision history, restoration, a recoverable trash, deduplicated file attachments, publication states, custom properties, parent-child navigation, and portable import/export. Pages use GitHub Flavored Markdown, `[[wiki-links]]`, backlinks, and tags. nwp stores a complete snapshot before each meaningful edit.
 
 ## Requirements
 
@@ -64,6 +64,14 @@ max_evidence_characters = 6000
 max_prompt_characters = 50000
 max_answer_characters = 12000
 include_general_knowledge = true
+
+[web_capture]
+enabled = true
+timeout_seconds = 30
+max_redirects = 5
+max_response_bytes = 20971520
+max_extracted_characters = 2000000
+user_agent = "nwp/0.14 (+local knowledge capture)"
 
 [document_rag]
 enabled = true
@@ -140,6 +148,12 @@ Page commands connect to the running local server and read the generated token a
 ./dist/nwp document cancel 2
 ./dist/nwp document retry 2
 ./dist/nwp document run --json
+./dist/nwp web add https://example.com/article
+./dist/nwp web list
+./dist/nwp web get 1
+./dist/nwp web cancel 1
+./dist/nwp web retry 1
+./dist/nwp web run --json
 ./dist/nwp index status --json
 ./dist/nwp index run
 ./dist/nwp export page 1 --output installation-guide.md
@@ -173,6 +187,9 @@ Available operations:
 - `GET|POST /api/v1/tags/definitions`
 - `GET /api/v1/semantic/status`
 - `GET|POST /api/v1/documents`
+- `GET|POST /api/v1/web-captures`
+- `GET /api/v1/web-captures/:id`
+- `POST /api/v1/web-captures/:id/cancel|retry`
 - `GET /api/v1/documents/ocr/status`
 - `GET /api/v1/documents/:id`
 - `GET|POST /api/v1/documents/:id/versions`
@@ -242,6 +259,11 @@ Tools:
 - `acknowledge_document_review`
 - `cancel_document_extraction`
 - `retry_document_extraction`
+- `queue_web_capture`
+- `list_web_captures`
+- `get_web_capture`
+- `cancel_web_capture`
+- `retry_web_capture`
 - `export_page`
 - `import_page`
 - `get_full_export`
@@ -271,7 +293,8 @@ A complete export is a streaming `tar.gz` containing:
 - historical snapshots under `history/`;
 - each deduplicated attachment blob under `attachments/`;
 - original document versions under `documents/`;
-- `manifest.json` with format version, associations, taxonomy, and document parser metadata.
+- retained raw web responses under `web/`;
+- `manifest.json` with format version, associations, taxonomy, document parser metadata, and web capture provenance.
 
 The archive is intended for portable backup and inspection. Page import accepts individual Markdown documents; restoring a complete archive into a database is part of the upcoming operational backup/restore tooling.
 
@@ -306,6 +329,14 @@ When enabled, the worker runs local Tesseract OCR with Spanish and English data.
 Every extracted section is added to FTS5 immediately and queued for durable semantic indexing. Document replacement removes stale search entries before the new version is extracted. Results link directly to the cited page, slide, sheet/range, image, or section in the content viewer.
 
 Office archives are parsed without executing macros, formulas, or external connections. Configurable technical guards constrain archive expansion, compression ratio, entry count, XML depth, PDF pages, spreadsheet cells, upload memory, OCR item counts, subprocess time, and OCR output. Run extraction with `nwp worker`, `nwp serve --with-worker`, or the one-shot `nwp document run`.
+
+## Web capture
+
+Queue a public page from `/web-captures`, `nwp web add`, REST, or MCP. The durable worker fetches it, retains the exact raw response as a content-addressed snapshot, extracts bounded Markdown, and sends that Markdown through the existing document extraction and semantic indexing pipeline. Each capture receives a linked wiki page with `source:web`, `type:web-capture`, and a `web.url` property. Once both workers finish, captured content participates in document search, cited answers, and complete exports.
+
+Network access is deliberately narrow: only HTTP(S) is allowed; URL credentials, localhost, private, loopback, link-local, multicast, documentation, and reserved addresses are blocked. nwp resolves every redirect independently, rejects any hostname with a non-public DNS answer, pins the validated address for the connection, sends no cookies or credentials, accepts only textual content, disables compression, and enforces redirect, timeout, response-byte, and extracted-character guards. Web content remains untrusted evidence and cannot issue model or tool instructions.
+
+A failed capture retries with a leased SQLite job up to three times. Cancellation and retry are explicit. Run capture with `nwp worker`, `nwp serve --with-worker`, or the one-shot `nwp web run`. The initial extractor is deterministic and native; browser-rendered and authenticated pages are intentionally outside this release.
 
 ## Trash
 
@@ -355,6 +386,7 @@ The main modules are:
 
 - `src/database.ts`: migrations and page/document persistence
 - `src/documents.ts`: safe document detection, extraction, and durable worker
+- `src/web.ts`: SSRF-resistant HTTP capture, deterministic extraction, and durable worker
 - `src/domain.ts`: validation and domain rules
 - `src/server.ts`: web and JSON HTTP handlers
 - `src/mcp.ts`: MCP tools and transport

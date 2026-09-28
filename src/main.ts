@@ -6,6 +6,7 @@ import { PageStore } from "./database.ts";
 import { createRequestHandler } from "./server.ts";
 import { loadEmbeddedSqliteVec, SemanticIndexer, semanticIndexConfig } from "./semantic.ts";
 import { canonicalDocumentMime, documentFormat, DocumentWorker } from "./documents.ts";
+import { WebCaptureWorker } from "./web.ts";
 
 const args = process.argv.slice(2);
 
@@ -27,12 +28,13 @@ async function main(argv: string[]): Promise<void> {
   if (command === "tree") return treeCommand(argv.slice(1));
   if (command === "tag") return tagCommand(argv.slice(1));
   if (command === "document") return documentCommand(argv.slice(1));
+  if (command === "web") return webCommand(argv.slice(1));
   if (command === "import") return importCommand(argv.slice(1));
   if (command === "export") return exportCommand(argv.slice(1));
   if (command === "worker") return workerCommand(argv.slice(1));
   if (command === "index") return indexCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") return printHelp();
-  if (command === "--version" || command === "-v") return console.log("nwp 0.13.0");
+  if (command === "--version" || command === "-v") return console.log("nwp 0.14.0");
   throw new Error(`unknown command '${command}'. Run 'nwp help'.`);
 }
 
@@ -56,6 +58,7 @@ async function serve(argv: string[]): Promise<void> {
     if (!extension.available) console.error(`semantic search unavailable: ${extension.error}`);
     else if (workerAbort) workerLoops.push(new SemanticIndexer(store, config.semanticSearch).runLoop(workerAbort.signal));
   }
+  if (workerAbort && config.webCapture.enabled && config.documentRag.enabled) workerLoops.push(new WebCaptureWorker(store, config.webCapture, config.documentRag.maxFileBytes).runLoop(workerAbort.signal));
   if (workerAbort && config.documentRag.enabled) workerLoops.push(new DocumentWorker(store, config.documentRag).runLoop(workerAbort.signal));
   if (workerLoops.length) console.error("background workers running in server process");
 
@@ -79,6 +82,35 @@ async function serve(argv: string[]): Promise<void> {
     store.close();
     await releaseLock();
   }
+}
+
+async function webCommand(argv: string[]): Promise<void> {
+  const action = argv[0] ?? "list";
+  const options = parseOptions(argv.slice(1));
+  const config = await loadConfig({ configPath: optionalString(options, "config"), dataDir: optionalString(options, "data-dir") });
+  if (action === "run") {
+    if (!config.webCapture.enabled || !config.documentRag.enabled) throw new Error("web capture and document ingestion must be enabled");
+    await ensureRuntimeFiles(config);
+    const store = new PageStore(config.dbPath);
+    try {
+      const captures = await new WebCaptureWorker(store, config.webCapture, config.documentRag.maxFileBytes).runUntilIdle();
+      const documents = config.documentRag.enabled ? await new DocumentWorker(store, config.documentRag).runUntilIdle() : 0;
+      return printResult({ captures, documents }, hasFlag(options, "json"));
+    } finally { store.close(); }
+  }
+  const token = optionalString(options, "token") ?? await readApiToken(config);
+  const endpoint = optionalString(options, "endpoint") ?? `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${config.port}`;
+  if (action === "list") return printResult(await apiRequest(endpoint, token, "/api/v1/web-captures", "GET"), true);
+  if (action === "add") {
+    const url = positional(options, 0);
+    if (!url) throw new Error("web add requires a public HTTP(S) URL");
+    return printResult(await apiRequest(endpoint, token, "/api/v1/web-captures", "POST", { url }), true);
+  }
+  if (["get", "cancel", "retry"].includes(action)) {
+    const id = integerArgument(options, 0, `web ${action} requires a capture ID`);
+    return printResult(await apiRequest(endpoint, token, `/api/v1/web-captures/${id}${action === "get" ? "" : `/${action}`}`, action === "get" ? "GET" : "POST"), true);
+  }
+  throw new Error("web command must be add, list, get, cancel, retry, or run");
 }
 
 async function documentCommand(argv: string[]): Promise<void> {
@@ -144,6 +176,7 @@ async function workerCommand(argv: string[]): Promise<void> {
     if (!extension.available) console.error(`semantic indexing unavailable: ${extension.error}`);
     else loops.push(new SemanticIndexer(store, config.semanticSearch).runLoop(abort.signal));
   }
+  if (config.webCapture.enabled && config.documentRag.enabled) loops.push(new WebCaptureWorker(store, config.webCapture, config.documentRag.maxFileBytes).runLoop(abort.signal));
   if (config.documentRag.enabled) loops.push(new DocumentWorker(store, config.documentRag).runLoop(abort.signal));
   const stop = () => abort.abort();
   process.once("SIGINT", stop);
@@ -591,6 +624,9 @@ Usage:
   nwp document get ID
   nwp document review|cancel|retry ID
   nwp document run [--json]
+  nwp web add URL
+  nwp web list|get|cancel|retry [ID]
+  nwp web run [--json]
   nwp trash list [--limit N] [--cursor CURSOR] [--json]
   nwp trash get|restore|purge ID [--json]
   nwp attachment add PAGE_ID PATH [--name FILENAME] [--json]
@@ -605,7 +641,7 @@ Usage:
   nwp worker
 
 Serve option:
-  --with-worker       Run document extraction and semantic indexing in the server process
+  --with-worker       Run web capture, document extraction, and semantic indexing in the server process
 
 Client options:
   --endpoint URL   Override the configured server URL

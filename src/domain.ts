@@ -243,6 +243,36 @@ export interface DocumentRecord {
   currentVersion: DocumentVersion;
 }
 
+export type WebCaptureStatus = "queued" | "fetching" | "ready" | "failed" | "cancelled";
+
+export interface WebCapture {
+  id: number;
+  pageId: number;
+  documentId: number | null;
+  url: string;
+  finalUrl: string | null;
+  status: WebCaptureStatus;
+  title: string | null;
+  contentType: string | null;
+  httpStatus: number | null;
+  lastError: string | null;
+  fetchedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WebCaptureSnapshot {
+  id: number;
+  webCaptureId: number;
+  blobSha256: string;
+  finalUrl: string;
+  httpStatus: number;
+  contentType: string;
+  title: string | null;
+  size: number;
+  fetchedAt: string;
+}
+
 export interface SemanticStatus {
   enabled: boolean;
   vectorAvailable: boolean;

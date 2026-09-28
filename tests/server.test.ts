@@ -27,6 +27,7 @@ beforeEach(async () => {
     attachmentMaxBytes: null,
     semanticSearch: { enabled: false, ollamaUrl: "http://127.0.0.1:11434", embeddingModel: "bge-m3", embeddingDimensions: 1024, queryPrefix: "", chunkCharacters: 1600, chunkOverlap: 200 },
     ragAnswer: { enabled: false, ollamaUrl: "http://127.0.0.1:11434", generationModel: "qwen3:8b", timeoutSeconds: 120, maxEvidenceItems: 8, maxEvidenceCharacters: 6000, maxPromptCharacters: 50_000, maxAnswerCharacters: 12_000, includeGeneralKnowledge: true },
+    webCapture: { enabled: true, timeoutSeconds: 30, maxRedirects: 5, maxResponseBytes: 20_000_000, maxExtractedCharacters: 2_000_000, userAgent: "nwp-test" },
     documentRag: { enabled: true, maxFileBytes: 10_000_000, maxExpandedBytes: 50_000_000, maxArchiveEntries: 10_000, maxCompressionRatio: 1000, maxPdfPages: 10_000, maxSpreadsheetCells: 5_000_000, ocrEnabled: false, tesseractCommand: "tesseract", pdfRendererCommand: "pdftoppm", ocrLanguages: ["spa", "eng"], ocrTimeoutSeconds: 120, maxOcrItems: 10_000, maxOcrOutputCharacters: 1_000_000 },
   };
   store = new PageStore(config.dbPath);
@@ -60,7 +61,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.13.0" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.14.0" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });
@@ -125,6 +126,20 @@ describe("HTTP API", () => {
     expect(store.getDocument(cancellable.id).status).toBe("cancelled");
     expect((await handler(api(`/api/v1/documents/${cancellable.id}/retry`, { method: "POST" }))).status).toBe(200);
     expect(store.getDocument(cancellable.id).status).toBe("queued");
+  });
+
+  test("queues and manages secure web captures", async () => {
+    const unsafe = await handler(api("/api/v1/web-captures", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: "http://127.0.0.1/private" }) }));
+    expect(unsafe.status).toBe(400);
+    const queued = await handler(api("/api/v1/web-captures", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: "https://example.com/article#part" }) }));
+    expect(queued.status).toBe(202);
+    const capture = await queued.json() as { id: number; url: string; status: string };
+    expect(capture).toMatchObject({ url: "https://example.com/article", status: "queued" });
+    expect((await handler(api(`/api/v1/web-captures/${capture.id}`))).status).toBe(200);
+    expect((await handler(api(`/api/v1/web-captures/${capture.id}/cancel`, { method: "POST" }))).status).toBe(200);
+    expect((await handler(api(`/api/v1/web-captures/${capture.id}/retry`, { method: "POST" }))).status).toBe(200);
+    expect((await handler(api("/api/v1/web-captures"))).status).toBe(200);
+    expect((await handler(request("/web-captures"))).status).toBe(200);
   });
 
   test("answers through REST and web with validated citations", async () => {
@@ -262,7 +277,7 @@ describe("HTTP API", () => {
     }));
     expect(toolsResponse.status).toBe(200);
     const tools = await toolsResponse.json() as { result: { tools: Array<{ name: string }> } };
-    expect(tools.result.tools.map(({ name }) => name).sort()).toEqual(["acknowledge_document_review", "answer_question", "cancel_document_extraction", "create_page", "define_tag", "delete_attachment", "delete_page", "document_ocr_status", "export_page", "get_attachment", "get_attachment_upload_instructions", "get_deleted_page", "get_document", "get_document_content", "get_document_upload_instructions", "get_full_export", "get_page", "get_page_tree", "get_revision_diff", "import_page", "list_attachments", "list_documents", "list_pages", "list_revisions", "list_tag_definitions", "list_trash", "purge_page", "restore_page", "restore_revision", "retry_document_extraction", "search_knowledge", "search_pages", "semantic_index_status", "update_page"]);
+    expect(tools.result.tools.map(({ name }) => name).sort()).toEqual(["acknowledge_document_review", "answer_question", "cancel_document_extraction", "cancel_web_capture", "create_page", "define_tag", "delete_attachment", "delete_page", "document_ocr_status", "export_page", "get_attachment", "get_attachment_upload_instructions", "get_deleted_page", "get_document", "get_document_content", "get_document_upload_instructions", "get_full_export", "get_page", "get_page_tree", "get_revision_diff", "get_web_capture", "import_page", "list_attachments", "list_documents", "list_pages", "list_revisions", "list_tag_definitions", "list_trash", "list_web_captures", "purge_page", "queue_web_capture", "restore_page", "restore_revision", "retry_document_extraction", "retry_web_capture", "search_knowledge", "search_pages", "semantic_index_status", "update_page"]);
   });
 });
 
