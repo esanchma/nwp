@@ -8,6 +8,7 @@ import { loadEmbeddedSqliteVec, OllamaEmbedder, SemanticIndexer, semanticIndexCo
 import { canonicalDocumentMime, documentFormat, DocumentWorker } from "./documents.ts";
 import { WebCaptureWorker } from "./web.ts";
 import { ResearchWorker } from "./research.ts";
+import { ContentTagWorker } from "./tagging.ts";
 import { createBackupFile, defaultBackupDirectory, listBackupFiles, prepareRestore, verifyBackupFile } from "./backup.ts";
 import { installSystemdService, systemdServiceStatus, uninstallSystemdService } from "./service.ts";
 
@@ -40,7 +41,7 @@ async function main(argv: string[]): Promise<void> {
   if (command === "worker") return workerCommand(argv.slice(1));
   if (command === "index") return indexCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") return printHelp();
-  if (command === "--version" || command === "-v") return console.log("nwp 0.20.1");
+  if (command === "--version" || command === "-v") return console.log("nwp 0.21.0");
   throw new Error(`unknown command '${command}'. Run 'nwp help'.`);
 }
 
@@ -67,6 +68,7 @@ async function serve(argv: string[]): Promise<void> {
   if (workerAbort && config.webCapture.enabled && config.documentRag.enabled) workerLoops.push(new WebCaptureWorker(store, config.webCapture, config.documentRag.maxFileBytes).runLoop(workerAbort.signal));
   if (workerAbort && config.research.enabled) workerLoops.push(new ResearchWorker(store, config.research, config.ragAnswer, config.semanticSearch.enabled ? new OllamaEmbedder(config.semanticSearch) : null).runLoop(workerAbort.signal));
   if (workerAbort && config.documentRag.enabled) workerLoops.push(new DocumentWorker(store, config.documentRag).runLoop(workerAbort.signal));
+  if (workerAbort && config.contentTagging.enabled) workerLoops.push(new ContentTagWorker(store, config.contentTagging).runLoop(workerAbort.signal));
   if (workerLoops.length) console.error("background workers running in server process");
 
   try {
@@ -177,6 +179,7 @@ async function researchCommand(argv: string[]): Promise<void> {
       const research = new ResearchWorker(store, config.research, config.ragAnswer, embedder);
       const web = new WebCaptureWorker(store, config.webCapture, config.documentRag.maxFileBytes);
       const documents = new DocumentWorker(store, config.documentRag);
+      const tagging = new ContentTagWorker(store, config.contentTagging);
       const idText = positional(options, 0);
       const targetId = idText === undefined ? null : Number(integerArgument(options, 0, "research run ID must be a positive integer"));
       let processed = 0;
@@ -184,6 +187,7 @@ async function researchCommand(argv: string[]): Promise<void> {
         processed += await research.runUntilIdle();
         processed += await web.runUntilIdle();
         processed += await documents.runUntilIdle();
+        processed += await tagging.runUntilIdle();
         if (semantic) processed += await semantic.runUntilIdle();
         await Bun.sleep(1100);
         processed += await research.runUntilIdle();
@@ -219,7 +223,8 @@ async function webCommand(argv: string[]): Promise<void> {
     try {
       const captures = await new WebCaptureWorker(store, config.webCapture, config.documentRag.maxFileBytes).runUntilIdle();
       const documents = config.documentRag.enabled ? await new DocumentWorker(store, config.documentRag).runUntilIdle() : 0;
-      return printResult({ captures, documents }, hasFlag(options, "json"));
+      const tagged = config.contentTagging.enabled ? await new ContentTagWorker(store, config.contentTagging).runUntilIdle() : 0;
+      return printResult({ captures, documents, tagged }, hasFlag(options, "json"));
     } finally { store.close(); }
   }
   const token = optionalString(options, "token") ?? await readApiToken(config);
@@ -288,7 +293,22 @@ async function documentCommand(argv: string[]): Promise<void> {
 async function tagCommand(argv: string[]): Promise<void> {
   const action = argv[0] ?? "list";
   const options = parseOptions(argv.slice(1));
-  const config = await loadConfig({ configPath: optionalString(options, "config") });
+  const config = await loadConfig({ configPath: optionalString(options, "config"), dataDir: optionalString(options, "data-dir") });
+  if (["run", "classify", "status"].includes(action)) {
+    await ensureRuntimeFiles(config);
+    const store = new PageStore(config.dbPath);
+    try {
+      if (action === "classify") {
+        const target = positional(options, 0);
+        const pageId = target === undefined || target === "all" ? undefined : Number(integerArgument(options, 0, "tag classify requires a page ID or all"));
+        const queued = store.requeueContentTagging(pageId);
+        const processed = config.contentTagging.enabled ? await new ContentTagWorker(store, config.contentTagging).runUntilIdle() : 0;
+        return printResult({ queued, processed, ...store.contentTaggingStatus() }, true);
+      }
+      if (action === "run") return printResult({ processed: config.contentTagging.enabled ? await new ContentTagWorker(store, config.contentTagging).runUntilIdle() : 0, ...store.contentTaggingStatus() }, true);
+      return printResult(store.contentTaggingStatus(), true);
+    } finally { store.close(); }
+  }
   const token = optionalString(options, "token") ?? await readApiToken(config);
   const endpoint = optionalString(options, "endpoint") ?? `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${config.port}`;
   let result: unknown;
@@ -296,14 +316,14 @@ async function tagCommand(argv: string[]): Promise<void> {
   else if (action === "define") result = await apiRequest(endpoint, token, "/api/v1/tags/definitions", "POST", {
     tag: requiredString(options, "tag"), kind: requiredString(options, "kind"), displayName: optionalString(options, "name") ?? requiredString(options, "tag"), aliases: csvOption(options, "aliases"), description: optionalString(options, "description"),
   });
-  else throw new Error("tag command must be list or define");
+  else throw new Error("tag command must be list, define, classify, run, or status");
   printResult(result, true);
 }
 
 async function workerCommand(argv: string[]): Promise<void> {
   const options = parseOptions(argv);
   const config = await loadConfig({ configPath: optionalString(options, "config"), dataDir: optionalString(options, "data-dir") });
-  if (!config.semanticSearch.enabled && !config.documentRag.enabled) throw new Error("all workers are disabled");
+  if (!config.semanticSearch.enabled && !config.documentRag.enabled && !config.contentTagging.enabled) throw new Error("all workers are disabled");
   await ensureRuntimeFiles(config);
   const store = new PageStore(config.dbPath);
   const abort = new AbortController();
@@ -316,6 +336,7 @@ async function workerCommand(argv: string[]): Promise<void> {
   if (config.webCapture.enabled && config.documentRag.enabled) loops.push(new WebCaptureWorker(store, config.webCapture, config.documentRag.maxFileBytes).runLoop(abort.signal));
   if (config.research.enabled) loops.push(new ResearchWorker(store, config.research, config.ragAnswer, config.semanticSearch.enabled ? new OllamaEmbedder(config.semanticSearch) : null).runLoop(abort.signal));
   if (config.documentRag.enabled) loops.push(new DocumentWorker(store, config.documentRag).runLoop(abort.signal));
+  if (config.contentTagging.enabled) loops.push(new ContentTagWorker(store, config.contentTagging).runLoop(abort.signal));
   const stop = () => abort.abort();
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
@@ -764,6 +785,8 @@ Usage:
   nwp tree [--status STATUS|all] [--json]
   nwp tag list
   nwp tag define --tag TAG --kind KIND [--name NAME] [--aliases LIST]
+  nwp tag status|run
+  nwp tag classify [PAGE_ID|all]
   nwp document import PATH
   nwp document replace ID PATH
   nwp document list

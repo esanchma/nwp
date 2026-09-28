@@ -65,6 +65,15 @@ max_prompt_characters = 50000
 max_answer_characters = 12000
 include_general_knowledge = true
 
+[content_tagging]
+enabled = true
+ollama_url = "http://127.0.0.1:11434"
+model = "qwen3:8b"
+timeout_seconds = 120
+max_input_characters = 16000
+max_topics = 3
+minimum_confidence = 0.65
+
 [web_capture]
 enabled = true
 timeout_seconds = 30
@@ -156,6 +165,9 @@ Page commands connect to the running local server and read the generated token a
 ./dist/nwp tree --status all
 ./dist/nwp tag define --tag topic:artificial-intelligence --kind topic --name "Artificial intelligence" --aliases "ai,ia,inteligencia-artificial"
 ./dist/nwp tag list
+./dist/nwp tag status
+./dist/nwp tag classify all # queue and classify existing document-backed pages
+./dist/nwp tag classify 42 # reclassify one page
 ./dist/nwp document import ./handbook.docx
 ./dist/nwp document list
 ./dist/nwp document ocr-status
@@ -440,6 +452,14 @@ Canonical tags have a kind (`topic`, `entity`, `source`, `type`, or `custom`), d
 
 Manage the vocabulary at `/taxonomy`, through REST, CLI, or MCP. Existing unclassified tags are migrated as `custom` definitions.
 
+## Automatic content topics
+
+After a document version is extracted, nwp queues topic classification. The classifier sends bounded section text to the configured local Ollama model and returns at most `content_tagging.max_topics` canonical topic tags above `minimum_confidence`. It first uses existing topic definitions and aliases. It can create a new `topic:` definition only when the vocabulary does not fit.
+
+The queue is leased, retryable, and separate from successful document ingestion. Ollama failures never fail a capture or import. nwp records generated assignments in `page_generated_tags`; page tags remain the rendered and searchable union of operational, human, and generated tags. Recapture replaces only generated assignments. If you remove a generated tag during a normal page edit, nwp suppresses that tag for the page until you add it again.
+
+Use `nwp tag status` to inspect the queue, `nwp tag run` to process pending work, and `nwp tag classify all` to backfill ready document-backed pages. The built-in vocabulary includes `topic:artificial-intelligence` and `topic:kubernetes`.
+
 ## Development
 
 Run the server from source:
@@ -454,6 +474,7 @@ The main modules are:
 - `src/documents.ts`: safe document detection, extraction, and durable worker
 - `src/web.ts`: native or delegated web capture, local image capture, bounded extraction, and durable worker
 - `src/research.ts`: bounded source discovery and durable multi-source cited synthesis
+- `src/tagging.ts`: bounded Ollama topic classifier and durable tagging worker
 - `src/domain.ts`: validation and domain rules
 - `src/server.ts`: web and JSON HTTP handlers
 - `src/mcp.ts`: MCP tools and transport

@@ -662,6 +662,47 @@ const migrations = [
   `
     ALTER TABLE web_capture_snapshots ADD COLUMN assets_captured INTEGER NOT NULL DEFAULT 0 CHECK (assets_captured IN (0, 1));
   `,
+  `
+    CREATE TABLE page_generated_tags (
+      page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+      tag TEXT NOT NULL COLLATE NOCASE REFERENCES tag_definitions(tag) ON DELETE CASCADE,
+      document_version_id INTEGER REFERENCES document_versions(id) ON DELETE SET NULL,
+      confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (page_id, tag)
+    );
+    CREATE TABLE page_tag_suppressions (
+      page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+      tag TEXT NOT NULL COLLATE NOCASE REFERENCES tag_definitions(tag) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (page_id, tag)
+    );
+    CREATE TABLE content_tag_queue (
+      document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+      version_id INTEGER NOT NULL REFERENCES document_versions(id) ON DELETE CASCADE,
+      requested_at TEXT NOT NULL,
+      available_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      revision INTEGER NOT NULL DEFAULT 1,
+      lease_owner TEXT,
+      lease_until TEXT,
+      last_error TEXT
+    );
+    INSERT OR IGNORE INTO tag_definitions(tag, kind, display_name, description, created_by, created_at)
+      VALUES ('topic:artificial-intelligence', 'topic', 'Artificial intelligence', 'Artificial intelligence, machine learning, and generative AI', 'model', datetime('now'));
+    INSERT OR IGNORE INTO tag_definitions(tag, kind, display_name, description, created_by, created_at)
+      VALUES ('topic:kubernetes', 'topic', 'Kubernetes', 'Kubernetes and cloud-native orchestration', 'model', datetime('now'));
+    INSERT OR IGNORE INTO tag_aliases(alias, canonical_tag) VALUES ('ai', 'topic:artificial-intelligence');
+    INSERT OR IGNORE INTO tag_aliases(alias, canonical_tag) VALUES ('artificial-intelligence', 'topic:artificial-intelligence');
+    INSERT OR IGNORE INTO tag_aliases(alias, canonical_tag) VALUES ('inteligencia-artificial', 'topic:artificial-intelligence');
+    INSERT OR IGNORE INTO tag_aliases(alias, canonical_tag) VALUES ('k8s', 'topic:kubernetes');
+    INSERT OR IGNORE INTO tag_aliases(alias, canonical_tag) VALUES ('kubernetes', 'topic:kubernetes');
+    INSERT INTO content_tag_queue(document_id, version_id, requested_at, available_at)
+      SELECT d.id, dv.id, datetime('now'), datetime('now')
+      FROM documents d
+      JOIN document_versions dv ON dv.document_id = d.id
+      WHERE d.status = 'ready' AND dv.id = (SELECT latest.id FROM document_versions latest WHERE latest.document_id = d.id ORDER BY latest.version DESC LIMIT 1);
+  `,
 ];
 
 export interface SemanticIndexConfig {
@@ -678,6 +719,8 @@ export interface DocumentChunkInput { sectionId: number; ordinal: number; conten
 export interface DocumentTask { documentId: number; versionId: number; revision: number; owner: string }
 export interface WebCaptureTask { webCaptureId: number; pageId: number; url: string; finalUrl: string | null; etag: string | null; lastModified: string | null; revision: number; owner: string }
 export interface ResearchTask { researchId: number; revision: number; owner: string; job: ResearchJob }
+export interface ContentTopic { tag: string; displayName: string; confidence: number }
+export interface ContentTagTask { documentId: number; versionId: number; pageId: number; revision: number; owner: string; title: string; sections: DocumentSection[] }
 export interface SemanticNeighbor { pageId: number; chunkId: number; content: string; distance: number }
 export interface DocumentSemanticNeighbor extends DocumentSearchResult { chunkId: number; content: string; distance: number }
 
@@ -994,6 +1037,7 @@ export class PageStore {
           "UPDATE pages SET title = ?, alias = ?, body = ?, status = ?, parent_id = ?, properties_json = ?, updated_at = ? WHERE id = ?",
           [title, alias, body, status, parentId, JSON.stringify(properties), now, id],
         );
+        if (parsed.tags !== undefined) this.reconcileGeneratedTagsAfterEdit(id, tags, now);
         this.replaceTags(id, tags);
         this.replaceProperties(id, properties);
         this.replaceLinks(id, body);
@@ -1772,6 +1816,7 @@ export class PageStore {
       this.db.run("DELETE FROM document_section_chunks WHERE section_id IN (SELECT ds.id FROM document_sections ds JOIN document_versions dv ON dv.id = ds.document_version_id WHERE dv.document_id = ?)", [task.documentId]);
       this.db.run("DELETE FROM document_semantic_index WHERE document_id = ?", [task.documentId]);
       this.db.run("INSERT INTO document_semantic_queue(document_id, version_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, ?, 0, 1) ON CONFLICT(document_id) DO UPDATE SET version_id = excluded.version_id, requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = document_semantic_queue.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [task.documentId, task.versionId, now, now]);
+      this.db.run("INSERT INTO content_tag_queue(document_id, version_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, ?, 0, 1) ON CONFLICT(document_id) DO UPDATE SET version_id = excluded.version_id, requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = content_tag_queue.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [task.documentId, task.versionId, now, now]);
       this.db.run("UPDATE document_versions SET status = 'ready', parser_version = ?, metadata_json = ?, ocr_status = ?, warnings_json = ?, extracted_at = ? WHERE id = ?", [parserVersion, JSON.stringify(extraction.metadata), extraction.ocrStatus, JSON.stringify(extraction.warnings), now, task.versionId]);
       this.db.run("UPDATE documents SET status = 'ready', needs_ocr = ?, ocr_status = ?, last_error = NULL, updated_at = ? WHERE id = ?", [extraction.needsOcr ? 1 : 0, extraction.ocrStatus, now, task.documentId]);
       this.db.run("DELETE FROM document_jobs WHERE document_id = ? AND revision = ?", [task.documentId, task.revision]);
@@ -1791,11 +1836,80 @@ export class PageStore {
     }).immediate();
   }
 
+  claimContentTagTask(owner: string, leaseMilliseconds = 10 * 60_000): ContentTagTask | null {
+    const now = new Date();
+    const claim = this.db.transaction(() => {
+      const row = this.db.query<{ document_id: number; version_id: number; page_id: number; title: string; revision: number }, [string, string]>(`SELECT q.document_id, q.version_id, d.page_id, p.title, q.revision
+        FROM content_tag_queue q JOIN documents d ON d.id = q.document_id JOIN pages p ON p.id = d.page_id
+        WHERE q.attempts < 3 AND q.available_at <= ? AND (q.lease_until IS NULL OR q.lease_until < ?) AND d.status = 'ready' AND p.deleted_at IS NULL
+        ORDER BY q.requested_at, q.document_id LIMIT 1`).get(now.toISOString(), now.toISOString());
+      if (!row) return null;
+      this.db.run("UPDATE content_tag_queue SET lease_owner = ?, lease_until = ? WHERE document_id = ? AND revision = ?", [owner, new Date(now.getTime() + leaseMilliseconds).toISOString(), row.document_id, row.revision]);
+      return row;
+    }).immediate();
+    return claim ? { documentId: claim.document_id, versionId: claim.version_id, pageId: claim.page_id, revision: claim.revision, owner, title: claim.title, sections: this.documentSections(claim.document_id, claim.version_id) } : null;
+  }
+
+  renewContentTagLease(task: ContentTagTask, leaseMilliseconds = 10 * 60_000): boolean {
+    return this.db.run("UPDATE content_tag_queue SET lease_until = ? WHERE document_id = ? AND version_id = ? AND revision = ? AND lease_owner = ?", [new Date(Date.now() + leaseMilliseconds).toISOString(), task.documentId, task.versionId, task.revision, task.owner]).changes === 1;
+  }
+
+  completeContentTagTask(task: ContentTagTask, topics: ContentTopic[]): void {
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      const current = this.db.query<{ version_id: number; revision: number; lease_owner: string | null }, [number]>("SELECT version_id, revision, lease_owner FROM content_tag_queue WHERE document_id = ?").get(task.documentId);
+      if (!current || current.version_id !== task.versionId || current.revision !== task.revision || current.lease_owner !== task.owner) return;
+      for (const topic of topics) this.db.run("INSERT OR IGNORE INTO tag_definitions(tag, kind, display_name, description, created_by, created_at) VALUES (?, 'topic', ?, NULL, 'model', ?)", [topic.tag, topic.displayName, now]);
+      const generatedBefore = new Set(this.db.query<{ tag: string }, [number]>("SELECT tag FROM page_generated_tags WHERE page_id = ?").all(task.pageId).map(({ tag }) => tag));
+      const currentTags = this.db.query<{ tag: string }, [number]>("SELECT tag FROM page_tags WHERE page_id = ?").all(task.pageId).map(({ tag }) => tag);
+      const humanTags = new Set(currentTags.filter((tag) => !generatedBefore.has(tag)));
+      const suppressed = new Set(this.db.query<{ tag: string }, [number]>("SELECT tag FROM page_tag_suppressions WHERE page_id = ?").all(task.pageId).map(({ tag }) => tag));
+      const generated = topics.map((topic) => ({ ...topic, tag: this.canonicalizeTags([topic.tag])[0]! })).filter(({ tag }) => !humanTags.has(tag) && !suppressed.has(tag));
+      const tags = normalizeTags([...humanTags, ...generated.map(({ tag }) => tag)]);
+      this.replaceTags(task.pageId, tags);
+      this.db.run("DELETE FROM page_generated_tags WHERE page_id = ?", [task.pageId]);
+      for (const topic of generated) this.db.run("INSERT INTO page_generated_tags(page_id, tag, document_version_id, confidence, created_at) VALUES (?, ?, ?, ?, ?)", [task.pageId, topic.tag, task.versionId, topic.confidence, now]);
+      this.refreshSearch(task.pageId);
+      this.refreshDocumentSearchForPage(task.pageId);
+      this.db.run("INSERT INTO semantic_index_queue(page_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, 0, 1) ON CONFLICT(page_id) DO UPDATE SET requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = semantic_index_queue.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [task.pageId, now, now]);
+      this.db.run("UPDATE documents SET managed_tags_json = ?, updated_at = ? WHERE id = ?", [JSON.stringify(tags), now, task.documentId]);
+      this.db.run("DELETE FROM content_tag_queue WHERE document_id = ? AND revision = ?", [task.documentId, task.revision]);
+    }).immediate();
+  }
+
+  failContentTagTask(task: ContentTagTask, message: string): void {
+    const row = this.db.query<{ attempts: number }, [number, number, number, string]>("SELECT attempts FROM content_tag_queue WHERE document_id = ? AND version_id = ? AND revision = ? AND lease_owner = ?").get(task.documentId, task.versionId, task.revision, task.owner);
+    if (!row) return;
+    const attempts = row.attempts + 1;
+    this.db.run("UPDATE content_tag_queue SET attempts = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, last_error = ? WHERE document_id = ? AND revision = ?", [attempts, new Date(Date.now() + Math.min(60_000, 1000 * 2 ** attempts)).toISOString(), message.slice(0, 2000), task.documentId, task.revision]);
+  }
+
+  requeueContentTagging(pageId?: number): number {
+    if (pageId !== undefined) this.getById(pageId);
+    const now = new Date().toISOString();
+    const sql = `SELECT d.id AS document_id, dv.id AS version_id FROM documents d JOIN pages p ON p.id = d.page_id JOIN document_versions dv ON dv.document_id = d.id
+      WHERE d.status = 'ready' AND p.deleted_at IS NULL AND dv.id = (SELECT latest.id FROM document_versions latest WHERE latest.document_id = d.id ORDER BY latest.version DESC LIMIT 1)`;
+    const rows = pageId === undefined
+      ? this.db.query<{ document_id: number; version_id: number }, []>(sql).all()
+      : this.db.query<{ document_id: number; version_id: number }, [number]>(`${sql} AND d.page_id = ?`).all(pageId);
+    for (const row of rows) this.db.run("INSERT INTO content_tag_queue(document_id, version_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, ?, 0, 1) ON CONFLICT(document_id) DO UPDATE SET version_id = excluded.version_id, requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = content_tag_queue.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [row.document_id, row.version_id, now, now]);
+    return rows.length;
+  }
+
+  contentTaggingStatus(): { pending: number; failed: number; generatedAssignments: number } {
+    return {
+      pending: this.db.query<{ count: number }, []>("SELECT count(*) AS count FROM content_tag_queue WHERE attempts < 3").get()!.count,
+      failed: this.db.query<{ count: number }, []>("SELECT count(*) AS count FROM content_tag_queue WHERE attempts >= 3").get()!.count,
+      generatedAssignments: this.db.query<{ count: number }, []>("SELECT count(*) AS count FROM page_generated_tags").get()!.count,
+    };
+  }
+
   cancelDocument(documentId: number): DocumentRecord {
     const document = this.getDocument(documentId);
     if (document.status !== "queued" && document.status !== "extracting") throw new AppError("document_not_running", "document extraction is not queued or running", 409);
     this.db.transaction(() => {
       this.db.run("DELETE FROM document_jobs WHERE document_id = ?", [documentId]);
+      this.db.run("DELETE FROM content_tag_queue WHERE document_id = ?", [documentId]);
       this.db.run("UPDATE documents SET status = 'cancelled', updated_at = ? WHERE id = ?", [new Date().toISOString(), documentId]);
       this.db.run("UPDATE document_versions SET status = 'cancelled' WHERE id = ?", [document.currentVersion.id]);
     }).immediate();
@@ -2110,6 +2224,17 @@ export class PageStore {
       suffix += 1;
     }
     return candidate;
+  }
+
+  private reconcileGeneratedTagsAfterEdit(pageId: number, submittedTags: string[], now: string): void {
+    const submitted = new Set(submittedTags);
+    const generated = this.db.query<{ tag: string }, [number]>("SELECT tag FROM page_generated_tags WHERE page_id = ?").all(pageId);
+    for (const { tag } of generated) {
+      if (submitted.has(tag)) continue;
+      this.db.run("INSERT OR IGNORE INTO page_tag_suppressions(page_id, tag, created_at) VALUES (?, ?, ?)", [pageId, tag, now]);
+      this.db.run("DELETE FROM page_generated_tags WHERE page_id = ? AND tag = ?", [pageId, tag]);
+    }
+    for (const tag of submitted) this.db.run("DELETE FROM page_tag_suppressions WHERE page_id = ? AND tag = ?", [pageId, tag]);
   }
 
   private replaceTags(pageId: number, tags: string[]): void {

@@ -29,6 +29,7 @@ beforeEach(async () => {
     ragAnswer: { enabled: false, ollamaUrl: "http://127.0.0.1:11434", generationModel: "qwen3:8b", timeoutSeconds: 120, maxEvidenceItems: 8, maxEvidenceCharacters: 6000, maxPromptCharacters: 50_000, maxAnswerCharacters: 12_000, includeGeneralKnowledge: true },
     webCapture: { enabled: true, timeoutSeconds: 30, maxRedirects: 5, maxResponseBytes: 20_000_000, maxExtractedCharacters: 2_000_000, maxAssetCount: 50, maxAssetBytes: 10_000_000, maxTotalAssetBytes: 50_000_000, fetchCommand: "", fetchMode: "trafilatura", fetchTimeoutSeconds: 180, maxFetchOutputBytes: 20_000_000, userAgent: "nwp-test" },
     research: { enabled: true, searchCommand: "", searchTimeoutSeconds: 60, maxSearchOutputBytes: 2_000_000, defaultMaxSources: 5, maximumSources: 20 },
+    contentTagging: { enabled: false, ollamaUrl: "http://127.0.0.1:11434", model: "qwen3:8b", timeoutSeconds: 120, maxInputCharacters: 16_000, maxTopics: 3, minimumConfidence: 0.65 },
     documentRag: { enabled: true, maxFileBytes: 10_000_000, maxExpandedBytes: 50_000_000, maxArchiveEntries: 10_000, maxCompressionRatio: 1000, maxPdfPages: 10_000, maxSpreadsheetCells: 5_000_000, ocrEnabled: false, tesseractCommand: "tesseract", pdfRendererCommand: "pdftoppm", ocrLanguages: ["spa", "eng"], ocrTimeoutSeconds: 120, maxOcrItems: 10_000, maxOcrOutputCharacters: 1_000_000 },
   };
   store = new PageStore(config.dbPath);
@@ -62,7 +63,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.20.1" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.21.0" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });
@@ -198,6 +199,11 @@ describe("HTTP API", () => {
     const status = await (await handler(api("/api/v1/semantic/status"))).json() as { enabled: boolean; pendingPages: number };
     expect(status.enabled).toBe(false);
     expect(status.pendingPages).toBeGreaterThan(0);
+    const tagging = await (await handler(api("/api/v1/content-tagging/status"))).json() as { pending: number; failed: number; generatedAssignments: number };
+    expect(tagging).toEqual({ pending: 0, failed: 0, generatedAssignments: 0 });
+    const reclassified = await handler(api("/api/v1/content-tagging/reclassify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pageId: page.id }) }));
+    expect(reclassified.status).toBe(202);
+    expect((await reclassified.json() as { queued: number }).queued).toBe(0);
   });
 
   test("searches through the API", async () => {
@@ -328,7 +334,7 @@ describe("HTTP API", () => {
     }));
     expect(toolsResponse.status).toBe(200);
     const tools = await toolsResponse.json() as { result: { tools: Array<{ name: string }> } };
-    expect(tools.result.tools.map(({ name }) => name).sort()).toEqual(["acknowledge_document_review", "answer_question", "cancel_document_extraction", "cancel_research", "cancel_web_capture", "create_page", "define_tag", "delete_attachment", "delete_page", "document_ocr_status", "export_page", "get_attachment", "get_attachment_upload_instructions", "get_deleted_page", "get_document", "get_document_content", "get_document_upload_instructions", "get_full_export", "get_health", "get_page", "get_page_tree", "get_research", "get_revision_diff", "get_statistics", "get_web_capture", "get_web_capture_export", "import_page", "list_attachments", "list_documents", "list_pages", "list_research", "list_revisions", "list_tag_definitions", "list_trash", "list_web_captures", "purge_page", "queue_research", "queue_web_capture", "refresh_web_capture", "restore_page", "restore_revision", "retry_document_extraction", "retry_research", "retry_web_capture", "schedule_web_capture", "search_knowledge", "search_pages", "semantic_index_status", "update_page"]);
+    expect(tools.result.tools.map(({ name }) => name).sort()).toEqual(["acknowledge_document_review", "answer_question", "cancel_document_extraction", "cancel_research", "cancel_web_capture", "create_page", "define_tag", "delete_attachment", "delete_page", "document_ocr_status", "export_page", "get_attachment", "get_attachment_upload_instructions", "get_content_tagging_status", "get_deleted_page", "get_document", "get_document_content", "get_document_upload_instructions", "get_full_export", "get_health", "get_page", "get_page_tree", "get_research", "get_revision_diff", "get_statistics", "get_web_capture", "get_web_capture_export", "import_page", "list_attachments", "list_documents", "list_pages", "list_research", "list_revisions", "list_tag_definitions", "list_trash", "list_web_captures", "purge_page", "queue_research", "queue_web_capture", "reclassify_content_topics", "refresh_web_capture", "restore_page", "restore_revision", "retry_document_extraction", "retry_research", "retry_web_capture", "schedule_web_capture", "search_knowledge", "search_pages", "semantic_index_status", "update_page"]);
 
     const healthResponse = await handler(request("/mcp", {
       method: "POST",

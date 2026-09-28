@@ -14,7 +14,7 @@ export const openApiDocument = {
   openapi: "3.1.0",
   info: {
     title: "nwp JSON API",
-    version: "0.20.1",
+    version: "0.21.0",
     description: "Local API for nano-wiki-pi. SQLite metadata is authoritative and every endpoint requires the generated Bearer token.",
     license: { name: "MIT", identifier: "MIT" },
   },
@@ -56,6 +56,12 @@ export const openApiDocument = {
     "/tags/definitions": {
       get: { tags: ["Taxonomy"], operationId: "listTagDefinitions", summary: "List canonical tags, aliases, kinds, and usage", responses: { "200": response("Tag definitions", { type: "object", required: ["tags"], properties: { tags: { type: "array", items: ref("TagDefinition") } } }), ...errorResponses } },
       post: { tags: ["Taxonomy"], operationId: "defineTag", summary: "Create or update a canonical tag", requestBody: { required: true, content: json({ type: "object", required: ["tag", "kind", "displayName"], properties: { tag: { type: "string" }, kind: { type: "string", enum: ["topic", "entity", "source", "type", "custom"] }, displayName: { type: "string" }, description: { type: ["string", "null"] }, aliases: { type: "array", items: { type: "string" } } } }) }, responses: { "201": response("Canonical tag", ref("TagDefinition")), ...errorResponses } },
+    },
+    "/content-tagging/status": {
+      get: { tags: ["Content tagging"], operationId: "getContentTaggingStatus", summary: "Get automatic content-topic queue status", responses: { "200": response("Content tagging status", { type: "object", required: ["pending", "failed", "generatedAssignments"], properties: { pending: { type: "integer", minimum: 0 }, failed: { type: "integer", minimum: 0 }, generatedAssignments: { type: "integer", minimum: 0 } } }), ...errorResponses } },
+    },
+    "/content-tagging/reclassify": {
+      post: { tags: ["Content tagging"], operationId: "reclassifyContentTopics", summary: "Queue ready document-backed pages for automatic topic classification", requestBody: { required: false, content: json({ type: "object", additionalProperties: false, properties: { pageId: { type: "integer", minimum: 1 } } }) }, responses: { "202": response("Queued content tagging", { type: "object", required: ["queued", "pending", "failed", "generatedAssignments"], properties: { queued: { type: "integer", minimum: 0 }, pending: { type: "integer", minimum: 0 }, failed: { type: "integer", minimum: 0 }, generatedAssignments: { type: "integer", minimum: 0 } } }), ...errorResponses } },
     },
     "/semantic/status": {
       get: { tags: ["Semantic"], operationId: "getSemanticStatus", summary: "Get semantic extension and indexing queue status", responses: { "200": response("Semantic status", ref("SemanticStatus")), ...errorResponses } },

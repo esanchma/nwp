@@ -68,6 +68,16 @@ export interface ResearchConfig {
   maximumSources: number;
 }
 
+export interface ContentTaggingConfig {
+  enabled: boolean;
+  ollamaUrl: string;
+  model: string;
+  timeoutSeconds: number;
+  maxInputCharacters: number;
+  maxTopics: number;
+  minimumConfidence: number;
+}
+
 export interface Config {
   host: string;
   port: number;
@@ -81,6 +91,7 @@ export interface Config {
   ragAnswer: RagAnswerConfig;
   webCapture: WebCaptureConfig;
   research: ResearchConfig;
+  contentTagging: ContentTaggingConfig;
 }
 
 export interface ConfigOverrides {
@@ -170,6 +181,16 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     defaultMaxSources: numberValue(researchInput.default_max_sources, "research.default_max_sources", 5),
     maximumSources: numberValue(researchInput.maximum_sources, "research.maximum_sources", 20),
   };
+  const taggingInput = objectValue(file.content_tagging, "content_tagging");
+  const contentTagging: ContentTaggingConfig = {
+    enabled: booleanValue(taggingInput.enabled, "content_tagging.enabled", true),
+    ollamaUrl: stringValue(taggingInput.ollama_url, "content_tagging.ollama_url", ragAnswer.ollamaUrl),
+    model: stringValue(taggingInput.model, "content_tagging.model", ragAnswer.generationModel),
+    timeoutSeconds: numberValue(taggingInput.timeout_seconds, "content_tagging.timeout_seconds", 120),
+    maxInputCharacters: numberValue(taggingInput.max_input_characters, "content_tagging.max_input_characters", 16_000),
+    maxTopics: numberValue(taggingInput.max_topics, "content_tagging.max_topics", 3),
+    minimumConfidence: numberValue(taggingInput.minimum_confidence, "content_tagging.minimum_confidence", 0.65),
+  };
   const documents = objectValue(file.document_rag, "document_rag");
   const documentRag: DocumentRagConfig = {
     enabled: booleanValue(documents.enabled, "document_rag.enabled", true),
@@ -211,6 +232,12 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
   if (research.defaultMaxSources > research.maximumSources || research.maximumSources > 100) throw new Error("research source limits are inconsistent or exceed 100");
   if (research.searchCommand && (research.searchCommand.length > 4096 || /[\r\n]/.test(research.searchCommand))) throw new Error("research.search_command must be a single executable path");
 
+  for (const [name, value] of Object.entries({ timeout_seconds: contentTagging.timeoutSeconds, max_input_characters: contentTagging.maxInputCharacters, max_topics: contentTagging.maxTopics })) {
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error(`content_tagging.${name} must be a positive integer`);
+  }
+  if (contentTagging.maxTopics > 5) throw new Error("content_tagging.max_topics must not exceed 5");
+  if (!Number.isFinite(contentTagging.minimumConfidence) || contentTagging.minimumConfidence < 0 || contentTagging.minimumConfidence > 1) throw new Error("content_tagging.minimum_confidence must be between 0 and 1");
+
   for (const [name, value] of Object.entries({ max_file_bytes: documentRag.maxFileBytes, max_expanded_bytes: documentRag.maxExpandedBytes, max_archive_entries: documentRag.maxArchiveEntries, max_compression_ratio: documentRag.maxCompressionRatio, max_pdf_pages: documentRag.maxPdfPages, max_spreadsheet_cells: documentRag.maxSpreadsheetCells, ocr_timeout_seconds: documentRag.ocrTimeoutSeconds, max_ocr_items: documentRag.maxOcrItems, max_ocr_output_characters: documentRag.maxOcrOutputCharacters })) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error(`document_rag.${name} must be a positive integer`);
   }
@@ -237,6 +264,7 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     ragAnswer,
     webCapture,
     research,
+    contentTagging,
   };
 }
 

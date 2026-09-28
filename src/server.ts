@@ -223,6 +223,12 @@ async function apiRoute(request: Request, url: URL, store: PageStore, config: Co
 
   if (request.method === "POST" && url.pathname === "/api/v1/answer") return json(await answerQuestion(store, embedder, config.ragAnswer, answerInput(await readJson(request)), request.signal));
   if (request.method === "GET" && url.pathname === "/api/v1/semantic/status") return json(store.semanticStatus(config.semanticSearch.enabled, config.semanticSearch.embeddingModel, config.semanticSearch.embeddingDimensions));
+  if (request.method === "GET" && url.pathname === "/api/v1/content-tagging/status") return json(store.contentTaggingStatus());
+  if (request.method === "POST" && url.pathname === "/api/v1/content-tagging/reclassify") {
+    const body = await readJson(request) as Record<string, unknown>;
+    if (body.pageId !== undefined && (!Number.isSafeInteger(body.pageId) || (body.pageId as number) < 1)) throw new AppError("invalid_page_id", "pageId must be a positive integer", 400);
+    return json({ queued: store.requeueContentTagging(body.pageId as number | undefined), ...store.contentTaggingStatus() }, 202);
+  }
   if (request.method === "GET" && url.pathname === "/api/v1/tags/definitions") return json({ tags: store.listTagDefinitions() });
   if (request.method === "POST" && url.pathname === "/api/v1/tags/definitions") {
     const body = await readJson(request) as Record<string, unknown>;

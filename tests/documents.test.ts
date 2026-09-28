@@ -104,6 +104,9 @@ describe("document storage and jobs", () => {
     db.db.run("DROP TABLE web_capture_assets");
     db.db.run("DROP TABLE web_capture_snapshots");
     db.db.run("DROP TABLE web_captures");
+    db.db.run("DROP TABLE content_tag_queue");
+    db.db.run("DROP TABLE page_tag_suppressions");
+    db.db.run("DROP TABLE page_generated_tags");
     db.db.run("DROP TABLE document_section_search");
     db.db.run("DROP TABLE document_chunk_embeddings");
     db.db.run("DROP TABLE document_section_chunks");
@@ -114,7 +117,7 @@ describe("document storage and jobs", () => {
     store = new PageStore(path);
     const columns = store.db.query<{ name: string }, []>("PRAGMA table_info(documents)").all().map(({ name }) => name);
     expect(columns).toContain("ocr_status");
-    expect(store.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(14);
+    expect(store.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(15);
   });
 
   test("runs local OCR through Tesseract and stores image citations", async () => {
