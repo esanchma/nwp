@@ -12,6 +12,18 @@ export interface SemanticSearchConfig {
   chunkOverlap: number;
 }
 
+export interface RagAnswerConfig {
+  enabled: boolean;
+  ollamaUrl: string;
+  generationModel: string;
+  timeoutSeconds: number;
+  maxEvidenceItems: number;
+  maxEvidenceCharacters: number;
+  maxPromptCharacters: number;
+  maxAnswerCharacters: number;
+  includeGeneralKnowledge: boolean;
+}
+
 export interface DocumentRagConfig {
   enabled: boolean;
   maxFileBytes: number;
@@ -39,6 +51,7 @@ export interface Config {
   attachmentMaxBytes: number | null;
   semanticSearch: SemanticSearchConfig;
   documentRag: DocumentRagConfig;
+  ragAnswer: RagAnswerConfig;
 }
 
 export interface ConfigOverrides {
@@ -89,6 +102,18 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     chunkCharacters: numberValue(semantic.chunk_characters, "semantic_search.chunk_characters", 1600),
     chunkOverlap: numberValue(semantic.chunk_overlap, "semantic_search.chunk_overlap", 200),
   };
+  const answer = objectValue(file.rag_answer, "rag_answer");
+  const ragAnswer: RagAnswerConfig = {
+    enabled: booleanValue(answer.enabled, "rag_answer.enabled", true),
+    ollamaUrl: stringValue(answer.ollama_url, "rag_answer.ollama_url", semanticSearch.ollamaUrl),
+    generationModel: stringValue(answer.generation_model, "rag_answer.generation_model", "qwen3:8b"),
+    timeoutSeconds: numberValue(answer.timeout_seconds, "rag_answer.timeout_seconds", 120),
+    maxEvidenceItems: numberValue(answer.max_evidence_items, "rag_answer.max_evidence_items", 8),
+    maxEvidenceCharacters: numberValue(answer.max_evidence_characters, "rag_answer.max_evidence_characters", 6000),
+    maxPromptCharacters: numberValue(answer.max_prompt_characters, "rag_answer.max_prompt_characters", 50_000),
+    maxAnswerCharacters: numberValue(answer.max_answer_characters, "rag_answer.max_answer_characters", 12_000),
+    includeGeneralKnowledge: booleanValue(answer.include_general_knowledge, "rag_answer.include_general_knowledge", true),
+  };
   const documents = objectValue(file.document_rag, "document_rag");
   const documentRag: DocumentRagConfig = {
     enabled: booleanValue(documents.enabled, "document_rag.enabled", true),
@@ -110,6 +135,10 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
   if (!Number.isInteger(semanticSearch.embeddingDimensions) || semanticSearch.embeddingDimensions < 1) throw new Error("semantic_search.embedding_dimensions must be a positive integer");
   if (!Number.isInteger(semanticSearch.chunkCharacters) || semanticSearch.chunkCharacters < 200) throw new Error("semantic_search.chunk_characters must be an integer of at least 200");
   if (!Number.isInteger(semanticSearch.chunkOverlap) || semanticSearch.chunkOverlap < 0 || semanticSearch.chunkOverlap >= semanticSearch.chunkCharacters) throw new Error("semantic_search.chunk_overlap must be smaller than chunk_characters");
+  for (const [name, value] of Object.entries({ timeout_seconds: ragAnswer.timeoutSeconds, max_evidence_items: ragAnswer.maxEvidenceItems, max_evidence_characters: ragAnswer.maxEvidenceCharacters, max_prompt_characters: ragAnswer.maxPromptCharacters, max_answer_characters: ragAnswer.maxAnswerCharacters })) {
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error(`rag_answer.${name} must be a positive integer`);
+  }
+  if (ragAnswer.maxPromptCharacters < ragAnswer.maxEvidenceCharacters) throw new Error("rag_answer.max_prompt_characters must not be smaller than max_evidence_characters");
 
   for (const [name, value] of Object.entries({ max_file_bytes: documentRag.maxFileBytes, max_expanded_bytes: documentRag.maxExpandedBytes, max_archive_entries: documentRag.maxArchiveEntries, max_compression_ratio: documentRag.maxCompressionRatio, max_pdf_pages: documentRag.maxPdfPages, max_spreadsheet_cells: documentRag.maxSpreadsheetCells, ocr_timeout_seconds: documentRag.ocrTimeoutSeconds, max_ocr_items: documentRag.maxOcrItems, max_ocr_output_characters: documentRag.maxOcrOutputCharacters })) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error(`document_rag.${name} must be a positive integer`);
@@ -134,6 +163,7 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     attachmentMaxBytes,
     semanticSearch,
     documentRag,
+    ragAnswer,
   };
 }
 

@@ -2,11 +2,11 @@
 
 nwp (nano-wiki-pi) is a small local wiki for people and development agents. It provides a server-rendered web interface, a CLI, and MCP tools over one SQLite database.
 
-nwp supports page creation, reading, listing, editing, hybrid full-text and semantic search, durable document extraction with local OCR, revision history, restoration, a recoverable trash, deduplicated file attachments, publication states, custom properties, parent-child navigation, and portable import/export. Pages use GitHub Flavored Markdown, `[[wiki-links]]`, backlinks, and tags. nwp stores a complete snapshot before each meaningful edit.
+nwp supports page creation, reading, listing, editing, hybrid full-text and semantic search, durable document extraction with local OCR, citation-grounded answers, revision history, restoration, a recoverable trash, deduplicated file attachments, publication states, custom properties, parent-child navigation, and portable import/export. Pages use GitHub Flavored Markdown, `[[wiki-links]]`, backlinks, and tags. nwp stores a complete snapshot before each meaningful edit.
 
 ## Requirements
 
-Building requires Bun 1.4 or newer on Linux x86-64. The compiled executable does not require Bun at runtime. Document OCR is optional and uses local `tesseract` plus the `spa` and `eng` language packs. OCR of scanned PDF pages also requires `pdftoppm` from Poppler. Ingestion remains available when these programs are absent.
+Building requires Bun 1.4 or newer on Linux x86-64. The compiled executable does not require Bun at runtime. Hybrid search and answers require a local Ollama service with the configured models; the defaults can be installed with `ollama pull bge-m3` and `ollama pull qwen3:8b`. Document OCR is optional and uses local `tesseract` plus the `spa` and `eng` language packs. OCR of scanned PDF pages also requires `pdftoppm` from Poppler. Ingestion remains available when these programs are absent.
 
 ## Build and test
 
@@ -53,6 +53,17 @@ embedding_dimensions = 1024
 query_prefix = ""
 chunk_characters = 1600
 chunk_overlap = 200
+
+[rag_answer]
+enabled = true
+ollama_url = "http://127.0.0.1:11434"
+generation_model = "qwen3:8b"
+timeout_seconds = 120
+max_evidence_items = 8
+max_evidence_characters = 6000
+max_prompt_characters = 50000
+max_answer_characters = 12000
+include_general_knowledge = true
 
 [document_rag]
 enabled = true
@@ -116,6 +127,7 @@ Page commands connect to the running local server and read the generated token a
 ./dist/nwp attachment delete 4
 ./dist/nwp search "installation runtime" --tags "nwp,guide" --status published
 ./dist/nwp search "approval policy" --source documents --format pdf --ocr-status completed --kind page
+./dist/nwp answer "¿Cuánto dura el permiso parental?" --source all --general-knowledge true
 ./dist/nwp tree --status all
 ./dist/nwp tag define --tag topic:artificial-intelligence --kind topic --name "Artificial intelligence" --aliases "ai,ia,inteligencia-artificial"
 ./dist/nwp tag list
@@ -157,6 +169,7 @@ Available operations:
 - `GET /api/v1/pages/:id-or-alias`
 - `PUT /api/v1/pages/:id`
 - `GET /api/v1/search?q=terms&mode=hybrid&source=all&format=pdf&kind=page&ocr_status=completed&hidden=false`
+- `POST /api/v1/answer` with a question and optional evidence filters
 - `GET|POST /api/v1/tags/definitions`
 - `GET /api/v1/semantic/status`
 - `GET|POST /api/v1/documents`
@@ -215,6 +228,7 @@ Tools:
 - `list_pages`
 - `search_pages`
 - `search_knowledge`
+- `answer_question`
 - `update_page`
 - `get_page_tree`
 - `list_tag_definitions`
@@ -315,6 +329,14 @@ The lexical index uses SQLite FTS5. Words are matched as case-insensitive prefix
 
 Use the advanced search page to choose hybrid or lexical mode and filter by source, document ID, format, version, OCR state, hidden state, section kind, update interval, tags, page state, and exact typed property values. Multiple text words, tags, and properties use AND semantics. When a matching document section exists, its linked wiki page is suppressed to avoid duplicate results. Search results use opaque cursors for pagination.
 
+## Citation-grounded answers
+
+Use `/answer`, `nwp answer`, `POST /api/v1/answer`, or the MCP `answer_question` tool to generate a synchronous answer with Ollama. The default generation model is `qwen3:8b`. nwp retrieves evidence first, labels it with application-generated IDs, and accepts only citations that resolve to those IDs. Document citations link to the exact section in the content viewer.
+
+Document and page content is treated as untrusted quoted evidence. The system prompt explicitly rejects instructions found inside evidence, generation uses a strict JSON schema, and nwp validates every inline citation. Each evidence-backed sentence or bullet must end in a marker such as `[E1]`. An invalid response receives one repair attempt; if it remains invalid, nwp abstains instead of returning an unsupported answer.
+
+Evidence-backed output and general model knowledge are separate response fields and separate sections in the web interface. General knowledge can be disabled per request or globally. When retrieval finds no evidence and general knowledge is disabled, nwp abstains without calling the generation model.
+
 ## Tag taxonomy
 
 Canonical tags have a kind (`topic`, `entity`, `source`, `type`, or `custom`), display name, optional description, and aliases. Aliases are resolved on page writes and tag-filtered searches. Defining an alias also migrates existing uses to the canonical tag while preserving search and semantic indexing.
@@ -338,4 +360,4 @@ The main modules are:
 - `src/mcp.ts`: MCP tools and transport
 - `src/main.ts`: executable and CLI
 
-The approved scope and later roadmap are in [`docs/mvp-spec.md`](docs/mvp-spec.md). The sqlite-vec packaging and Ollama embedding experiments are documented in [`docs/semantic-search-spikes.md`](docs/semantic-search-spikes.md). The reproducible document retrieval smoke benchmark is in [`docs/document-search-benchmark.md`](docs/document-search-benchmark.md).
+The approved scope and later roadmap are in [`docs/mvp-spec.md`](docs/mvp-spec.md). The sqlite-vec packaging and Ollama embedding experiments are documented in [`docs/semantic-search-spikes.md`](docs/semantic-search-spikes.md). The reproducible document retrieval smoke benchmark is in [`docs/document-search-benchmark.md`](docs/document-search-benchmark.md). Citation-grounded answer results and reproduction instructions are in [`docs/rag-answer-benchmark.md`](docs/rag-answer-benchmark.md).

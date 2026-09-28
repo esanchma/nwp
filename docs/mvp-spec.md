@@ -240,6 +240,8 @@ Version 0.11 adds optional local OCR. The durable worker invokes configurable Te
 
 Version 0.12 indexes current document sections in FTS5 and sqlite-vec through a separate leased semantic queue. Unified reciprocal-rank fusion returns page or citation-ready document hits and suppresses the linked wiki page when its document evidence already matches. Replacement removes stale lexical and vector entries before indexing the new version. Filters cover source, document, format, version, OCR state, hidden state, section kind, update interval, linked-page tags, publication state, and typed properties. Web, REST/OpenAPI, CLI, and MCP expose the same retrieval behavior and preserve lexical fallback when Ollama or sqlite-vec is unavailable.
 
+Version 0.13 adds synchronous citation-grounded answers through configurable Ollama generation, with `qwen3:8b` as the default. Retrieval produces application-owned evidence IDs and precise viewer links. The model receives document content only as untrusted quoted data, cannot choose arbitrary citations, and must cite every evidence-backed sentence or bullet. Strict structured output, citation validation, one bounded repair attempt, and safe abstention prevent malformed or unsupported answers from reaching users. General model knowledge is optional and returned in a separate labeled field. Web, REST/OpenAPI, CLI, and MCP expose the same answer contract.
+
 ## Roadmap
 
 The following decisions describe the remaining product vision and do not expand the original MVP scope.

@@ -7,13 +7,14 @@ const errorResponses = {
   "404": { $ref: "#/components/responses/NotFound" },
   "409": { $ref: "#/components/responses/Conflict" },
   "413": { $ref: "#/components/responses/TooLarge" },
+  "503": { $ref: "#/components/responses/ServiceUnavailable" },
 };
 
 export const openApiDocument = {
   openapi: "3.1.0",
   info: {
     title: "nwp JSON API",
-    version: "0.12.0",
+    version: "0.13.0",
     description: "Local API for nano-wiki-pi. SQLite metadata is authoritative and every endpoint requires the generated Bearer token.",
     license: { name: "MIT", identifier: "MIT" },
   },
@@ -94,6 +95,9 @@ export const openApiDocument = {
     "/documents/{documentId}/retry": {
       parameters: [{ $ref: "#/components/parameters/DocumentId" }],
       post: { tags: ["Documents"], operationId: "retryDocumentExtraction", summary: "Retry failed or cancelled extraction", responses: { "200": response("Queued document", ref("Document")), ...errorResponses } },
+    },
+    "/answer": {
+      post: { tags: ["Search"], operationId: "answerQuestion", summary: "Generate a citation-validated answer from retrieved evidence", requestBody: { required: true, content: json(ref("AnswerRequest")) }, responses: { "200": response("Grounded answer", ref("AnswerResult")), ...errorResponses } },
     },
     "/search": {
       get: {
@@ -212,7 +216,7 @@ export const openApiDocument = {
     },
     responses: {
       BadRequest: response("Invalid request", ref("Error")), Unauthorized: response("Missing or invalid Bearer token", ref("Error")),
-      NotFound: response("Resource not found", ref("Error")), Conflict: response("Resource conflict", ref("Error")), TooLarge: response("Request exceeds configured limits", ref("Error")),
+      NotFound: response("Resource not found", ref("Error")), Conflict: response("Resource conflict", ref("Error")), TooLarge: response("Request exceeds configured limits", ref("Error")), ServiceUnavailable: response("Required local model capability is unavailable", ref("Error")),
     },
     schemas: {
       PageStatus: { type: "string", enum: ["draft", "published", "archived"] },
@@ -241,6 +245,10 @@ export const openApiDocument = {
       DocumentSearchResult: { type: "object", required: ["sectionId", "ordinal", "documentId", "versionId", "version", "pageId", "filename", "format", "kind", "locator", "hidden", "ocrStatus", "updatedAt", "excerpt"], properties: { sectionId: { type: "integer" }, ordinal: { type: "integer" }, documentId: { type: "integer" }, versionId: { type: "integer" }, version: { type: "integer" }, pageId: { type: "integer" }, filename: { type: "string" }, format: { type: "string", enum: ["docx", "xlsx", "pptx", "pdf", "markdown", "text"] }, kind: { type: "string", enum: ["heading", "paragraph", "table", "slide", "notes", "sheet", "page", "image", "text"] }, locator: ref("DocumentLocator"), hidden: { type: "boolean" }, ocrStatus: ref("OcrStatus"), updatedAt: { type: "string", format: "date-time" }, excerpt: { type: "string" } } },
       SearchHit: { oneOf: [{ type: "object", required: ["source", "page"], properties: { source: { const: "page" }, page: ref("SearchResult") } }, { type: "object", required: ["source", "document"], properties: { source: { const: "document" }, document: ref("DocumentSearchResult") } }] },
       SearchResults: { type: "object", required: ["pages", "hits", "nextCursor"], properties: { pages: { type: "array", items: ref("SearchResult") }, hits: { type: "array", items: ref("SearchHit") }, nextCursor: { type: ["string", "null"] }, mode: { type: "string", enum: ["hybrid", "lexical"] }, warning: { type: "string" } } },
+      AnswerFilters: { type: "object", additionalProperties: false, properties: { source: { type: "string", enum: ["all", "pages", "documents"] }, documentId: { type: "integer", minimum: 1 }, format: { type: "string", enum: ["docx", "xlsx", "pptx", "pdf", "markdown", "text"] }, version: { type: "integer", minimum: 1 }, ocrStatus: ref("OcrStatus"), hidden: { type: "boolean" }, kind: { type: "string", enum: ["heading", "paragraph", "table", "slide", "notes", "sheet", "page", "image", "text"] }, updatedAfter: { type: "string" }, updatedBefore: { type: "string" } } },
+      AnswerRequest: { type: "object", additionalProperties: false, required: ["question"], properties: { question: { type: "string", minLength: 1, maxLength: 4000 }, includeGeneralKnowledge: { type: "boolean" }, tags: { type: "array", items: { type: "string" } }, status: { type: "string", enum: ["published", "draft", "archived", "all"] }, properties: ref("Properties"), filters: ref("AnswerFilters") } },
+      AnswerCitation: { type: "object", required: ["id", "source", "title", "locator", "url", "excerpt"], properties: { id: { type: "string", pattern: "^E[1-9][0-9]*$" }, source: { type: "string", enum: ["page", "document"] }, title: { type: "string" }, locator: { type: "string" }, url: { type: "string" }, excerpt: { type: "string" } } },
+      AnswerResult: { type: "object", required: ["question", "answer", "generalKnowledge", "abstained", "citations", "model", "retrievalMode"], properties: { question: { type: "string" }, answer: { type: "string" }, generalKnowledge: { type: ["string", "null"] }, abstained: { type: "boolean" }, citations: { type: "array", items: ref("AnswerCitation") }, model: { type: "string" }, retrievalMode: { type: "string", enum: ["lexical", "hybrid"] }, warning: { type: "string" } } },
       TagDefinition: { type: "object", required: ["tag", "kind", "displayName", "description", "createdBy", "aliases", "usageCount", "createdAt"], properties: { tag: { type: "string" }, kind: { type: "string", enum: ["topic", "entity", "source", "type", "custom"] }, displayName: { type: "string" }, description: { type: ["string", "null"] }, createdBy: { type: "string", enum: ["human", "model", "migration"] }, aliases: { type: "array", items: { type: "string" } }, usageCount: { type: "integer" }, createdAt: { type: "string", format: "date-time" } } },
       SemanticStatus: { type: "object", required: ["enabled", "vectorAvailable", "model", "dimensions", "pendingPages", "indexedPages", "pendingDocuments", "indexedDocuments", "lastError"], properties: { enabled: { type: "boolean" }, vectorAvailable: { type: "boolean" }, model: { type: "string" }, dimensions: { type: "integer" }, pendingPages: { type: "integer" }, indexedPages: { type: "integer" }, pendingDocuments: { type: "integer" }, indexedDocuments: { type: "integer" }, lastError: { type: ["string", "null"] } } },
       OcrStatus: { type: "string", enum: ["not_required", "pending", "completed", "partial", "unavailable"] },

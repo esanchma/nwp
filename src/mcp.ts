@@ -1,7 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
-import type { DocumentRagConfig, SemanticSearchConfig } from "./config.ts";
+import { answerQuestion } from "./answer.ts";
+import type { DocumentRagConfig, RagAnswerConfig, SemanticSearchConfig } from "./config.ts";
 import type { PageStore } from "./database.ts";
 import { compareRevision } from "./history.ts";
 import type { Attachment } from "./domain.ts";
@@ -9,9 +10,9 @@ import { exportPageMarkdown, importPageMarkdown } from "./transfer.ts";
 import { hybridSearch, lexicalSearch, OllamaEmbedder } from "./semantic.ts";
 import { ocrRuntimeStatus } from "./documents.ts";
 
-export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig): (request: Request) => Promise<Response> {
+export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig, answerConfig?: RagAnswerConfig): (request: Request) => Promise<Response> {
   return async (request) => {
-    const server = createServer(store, semanticConfig, documentConfig);
+    const server = createServer(store, semanticConfig, documentConfig, answerConfig);
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
@@ -22,9 +23,9 @@ export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSear
   };
 }
 
-function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig): McpServer {
+function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig, answerConfig?: RagAnswerConfig): McpServer {
   const embedder = semanticConfig?.enabled ? new OllamaEmbedder(semanticConfig) : null;
-  const server = new McpServer({ name: "nwp", version: "0.12.0" });
+  const server = new McpServer({ name: "nwp", version: "0.13.0" });
   const statusSchema = z.enum(["draft", "published", "archived"]);
   const statusFilterSchema = z.enum(["draft", "published", "archived", "all"]);
   const propertiesSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]));
@@ -107,6 +108,19 @@ function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, d
       if (!state.vectorAvailable || state.indexedPages + state.indexedDocuments === 0) return toolResult({ ...lexicalSearch(store, query, tags, cursor ?? null, limit, status, properties, filters), warning: "Semantic index is unavailable or empty." });
       try { return toolResult(await hybridSearch(store, embedder, query, tags, cursor ?? null, limit, status, properties, undefined, filters)); }
       catch (error) { return toolResult({ ...lexicalSearch(store, query, tags, null, limit, status, properties, filters), warning: `Semantic search unavailable: ${error instanceof Error ? error.message : String(error)}` }); }
+    },
+  );
+
+  server.registerTool(
+    "answer_question",
+    {
+      description: "Answer a question from retrieved nwp evidence with validated inline citations and separately labeled general knowledge",
+      inputSchema: { question: z.string().min(1).max(4000), include_general_knowledge: z.boolean().optional(), source: z.enum(["all", "pages", "documents"]).default("all"), document_id: z.number().int().positive().optional(), format: z.enum(["docx", "xlsx", "pptx", "pdf", "markdown", "text"]).optional(), ocr_status: z.enum(["not_required", "pending", "completed", "partial", "unavailable"]).optional(), hidden: z.boolean().optional(), kind: z.enum(["heading", "paragraph", "table", "slide", "notes", "sheet", "page", "image", "text"]).optional(), tags: z.array(z.string()).default([]), status: statusFilterSchema.default("published"), properties: propertiesSchema.default({}) },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ question, include_general_knowledge, source, document_id, format, ocr_status, hidden, kind, tags, status, properties }) => {
+      if (!answerConfig) throw new Error("RAG answering is not configured");
+      return toolResult(await answerQuestion(store, embedder, answerConfig, { question, includeGeneralKnowledge: include_general_knowledge, tags, status, properties, filters: { source, documentId: document_id, format, ocrStatus: ocr_status, hidden, kind } }));
     },
   );
 

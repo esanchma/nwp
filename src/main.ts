@@ -21,6 +21,7 @@ async function main(argv: string[]): Promise<void> {
   if (command === "serve") return serve(argv.slice(1));
   if (command === "page") return pageCommand(argv.slice(1));
   if (command === "search") return searchCommand(argv.slice(1));
+  if (command === "answer") return answerCommand(argv.slice(1));
   if (command === "trash") return trashCommand(argv.slice(1));
   if (command === "attachment") return attachmentCommand(argv.slice(1));
   if (command === "tree") return treeCommand(argv.slice(1));
@@ -31,7 +32,7 @@ async function main(argv: string[]): Promise<void> {
   if (command === "worker") return workerCommand(argv.slice(1));
   if (command === "index") return indexCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") return printHelp();
-  if (command === "--version" || command === "-v") return console.log("nwp 0.12.0");
+  if (command === "--version" || command === "-v") return console.log("nwp 0.13.0");
   throw new Error(`unknown command '${command}'. Run 'nwp help'.`);
 }
 
@@ -394,6 +395,32 @@ async function searchCommand(argv: string[]): Promise<void> {
   printResult(result, hasFlag(options, "json"));
 }
 
+async function answerCommand(argv: string[]): Promise<void> {
+  const options = parseOptions(argv);
+  const question = positional(options, 0) ?? optionalString(options, "question");
+  if (!question) throw new Error("answer requires a question");
+  const config = await loadConfig({ configPath: optionalString(options, "config") });
+  const token = optionalString(options, "token") ?? await readApiToken(config);
+  const endpoint = optionalString(options, "endpoint") ?? `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${config.port}`;
+  const filters: Record<string, unknown> = {};
+  const strings = [["source", "source"], ["format", "format"], ["ocr-status", "ocrStatus"], ["kind", "kind"], ["updated-after", "updatedAfter"], ["updated-before", "updatedBefore"]] as const;
+  for (const [option, field] of strings) { const value = optionalString(options, option); if (value) filters[field] = value; }
+  const documentId = optionalNumber(options, "document");
+  const version = optionalNumber(options, "version");
+  if (documentId !== undefined) filters.documentId = documentId;
+  if (version !== undefined) filters.version = version;
+  const hidden = optionalString(options, "hidden");
+  if (hidden !== undefined) {
+    if (hidden !== "true" && hidden !== "false") throw new Error("--hidden must be true or false");
+    filters.hidden = hidden === "true";
+  }
+  const general = optionalString(options, "general-knowledge");
+  if (general !== undefined && general !== "true" && general !== "false") throw new Error("--general-knowledge must be true or false");
+  const body: Record<string, unknown> = { question, tags: csvOption(options, "tags"), status: optionalString(options, "status") ?? "published", properties: jsonObjectOption(options, "properties"), filters };
+  if (general !== undefined) body.includeGeneralKnowledge = general === "true";
+  printResult(await apiRequest(endpoint, token, "/api/v1/answer", "POST", body), hasFlag(options, "json"));
+}
+
 async function apiRequest(endpoint: string, token: string, path: string, method: string, body?: unknown): Promise<unknown> {
   const response = await fetch(new URL(path, endpoint), {
     method,
@@ -413,6 +440,12 @@ async function apiRequest(endpoint: string, token: string, path: string, method:
 function printResult(result: unknown, asJson: boolean): void {
   if (asJson) return console.log(JSON.stringify(result, null, 2));
   if (isPage(result)) return console.log(`${result.id}\t${result.alias}\t${result.title}`);
+  if (isObject(result) && typeof result.answer === "string" && typeof result.abstained === "boolean") {
+    console.log(result.abstained ? "No hay evidencia suficiente para responder." : result.answer);
+    if (typeof result.generalKnowledge === "string" && result.generalKnowledge) console.log(`\nConocimiento general (sin respaldo documental):\n${result.generalKnowledge}`);
+    if (Array.isArray(result.citations)) for (const citation of result.citations) if (isObject(citation)) console.log(`\n${String(citation.id ?? "")}\t${String(citation.title ?? "")}\t${String(citation.locator ?? "")}\t${String(citation.url ?? "")}`);
+    return;
+  }
   if (isObject(result) && Array.isArray(result.hits)) {
     for (const hit of result.hits) {
       if (!isObject(hit)) continue;
@@ -547,6 +580,7 @@ Usage:
   nwp page diff ID REVISION_ID [--json]
   nwp page restore ID REVISION_ID [--json]
   nwp search [QUERY] [--mode hybrid|lexical] [--source all|pages|documents] [--format FORMAT] [--document ID] [--version N] [--ocr-status STATUS] [--hidden true|false] [--kind KIND] [--updated-after ISO] [--updated-before ISO] [--tags a,b] [--status STATUS|all] [--properties JSON] [--limit N] [--cursor CURSOR] [--json]
+  nwp answer "QUESTION" [--source all|pages|documents] [--document ID] [--format FORMAT] [--kind KIND] [--general-knowledge true|false] [--json]
   nwp tree [--status STATUS|all] [--json]
   nwp tag list
   nwp tag define --tag TAG --kind KIND [--name NAME] [--aliases LIST]
