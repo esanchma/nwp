@@ -246,6 +246,8 @@ Version 0.14 adds durable public-web capture. A leased SQLite worker fetches HTT
 
 Version 0.15 adds manual and scheduled conditional recapture with `ETag` and `Last-Modified`, immutable changed snapshots, no-op handling for HTTP 304 or byte-identical responses, and document-version replacement that preserves human page edits. Durable multi-source research accepts explicit URLs or bounded discovery through an optional `web-research search` subprocess, while nwp retains control of every SSRF-resistant fetch. Research waits for extraction, restricts retrieval to the selected document IDs, generates citation-validated synthesis without general model knowledge, and persists jobs, sources, results, retries, and cancellation across web, REST/OpenAPI, CLI, MCP, and complete exports.
 
+Version 0.16 adds exact complete-archive recovery. Export format 2 includes an integrity-protected SQLite snapshot alongside inspectable logical metadata and content-addressed blobs. Backup verification enforces path, type, count, expansion, size, SHA-256, SQLite integrity, foreign-key, and referenced-blob checks. Dry runs build disposable restored instances; real restores require the instance lock, create an automatic pre-restore archive, preserve the API token, and atomically swap a validated staging directory with rollback on failure. CLI commands cover create, list, verify, and restore. A hardened systemd user service manages the server and workers, while MCP health and statistics tools expose database and durable-queue state.
+
 ## Roadmap
 
 The following decisions describe the remaining product vision and do not expand the original MVP scope.
@@ -257,10 +259,8 @@ The following decisions describe the remaining product vision and do not expand 
 
 ### Files and portability
 
-- complete logical archive restore and migration workflows.
+- selective restore and cross-instance merge workflows.
 
 ### Interfaces and operation
 
-- MCP statistics tools;
-- `nwp service install` for a systemd user unit;
-- native database backup and restore workflows.
+- guided diagnostics and maintenance scheduling.

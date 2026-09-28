@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-import { open, readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { ensureRuntimeFiles, loadConfig, readApiToken, type ConfigOverrides } from "./config.ts";
 import { PageStore } from "./database.ts";
 import { createRequestHandler } from "./server.ts";
@@ -8,6 +8,8 @@ import { loadEmbeddedSqliteVec, OllamaEmbedder, SemanticIndexer, semanticIndexCo
 import { canonicalDocumentMime, documentFormat, DocumentWorker } from "./documents.ts";
 import { WebCaptureWorker } from "./web.ts";
 import { ResearchWorker } from "./research.ts";
+import { createBackupFile, defaultBackupDirectory, listBackupFiles, prepareRestore, verifyBackupFile } from "./backup.ts";
+import { installSystemdService, systemdServiceStatus, uninstallSystemdService } from "./service.ts";
 
 const args = process.argv.slice(2);
 
@@ -31,12 +33,14 @@ async function main(argv: string[]): Promise<void> {
   if (command === "document") return documentCommand(argv.slice(1));
   if (command === "web") return webCommand(argv.slice(1));
   if (command === "research") return researchCommand(argv.slice(1));
+  if (command === "backup") return backupCommand(argv.slice(1));
+  if (command === "service") return serviceCommand(argv.slice(1));
   if (command === "import") return importCommand(argv.slice(1));
   if (command === "export") return exportCommand(argv.slice(1));
   if (command === "worker") return workerCommand(argv.slice(1));
   if (command === "index") return indexCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") return printHelp();
-  if (command === "--version" || command === "-v") return console.log("nwp 0.15.0");
+  if (command === "--version" || command === "-v") return console.log("nwp 0.16.0");
   throw new Error(`unknown command '${command}'. Run 'nwp help'.`);
 }
 
@@ -85,6 +89,73 @@ async function serve(argv: string[]): Promise<void> {
     store.close();
     await releaseLock();
   }
+}
+
+async function backupCommand(argv: string[]): Promise<void> {
+  const action = argv[0] ?? "list";
+  const options = parseOptions(argv.slice(1));
+  const config = await loadConfig({ configPath: optionalString(options, "config"), dataDir: optionalString(options, "data-dir") });
+  const backupDirectory = optionalString(options, "backup-dir") ?? defaultBackupDirectory(config.dataDir);
+  if (action === "list") return printResult({ backups: await listBackupFiles(backupDirectory) }, true);
+  if (action === "verify") {
+    const path = positional(options, 0);
+    if (!path) throw new Error("backup verify requires an archive path");
+    return printResult({ path: resolve(path), valid: true, summary: await verifyBackupFile(path, config.documentRag) }, true);
+  }
+  if (action === "create") {
+    await ensureRuntimeFiles(config);
+    const releaseLock = await acquireLock(join(config.dataDir, "nwp.lock"));
+    const store = new PageStore(config.dbPath);
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const output = optionalString(options, "output") ?? join(backupDirectory, `nwp-backup-${stamp}.tar.gz`);
+      return printResult(await createBackupFile(store, output), true);
+    } finally { store.close(); await releaseLock(); }
+  }
+  if (action === "restore") {
+    const path = positional(options, 0);
+    if (!path) throw new Error("backup restore requires an archive path");
+    const staging = `${resolve(config.dataDir)}.restore-${process.pid}-${crypto.randomUUID()}`;
+    if (hasFlag(options, "dry-run")) {
+      const summary = await prepareRestore(path, staging, config.documentRag, null);
+      await rm(staging, { recursive: true, force: true });
+      return printResult({ path: resolve(path), valid: true, dryRun: true, summary }, true);
+    }
+    await ensureRuntimeFiles(config);
+    const token = await readApiToken(config);
+    const releaseLock = await acquireLock(join(config.dataDir, "nwp.lock"));
+    const rollback = `${resolve(config.dataDir)}.rollback-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    try {
+      const summary = await prepareRestore(path, staging, config.documentRag, token);
+      if (await Bun.file(config.dbPath).exists()) {
+        const store = new PageStore(config.dbPath);
+        try {
+          const output = join(backupDirectory, `nwp-pre-restore-${new Date().toISOString().replace(/[:.]/g, "-")}.tar.gz`);
+          await createBackupFile(store, output);
+        } finally { store.close(); }
+      }
+      await writeFile(join(staging, "nwp.lock"), `${process.pid}\n`, { mode: 0o600, flag: "wx" });
+      await rename(resolve(config.dataDir), rollback);
+      try { await rename(staging, resolve(config.dataDir)); }
+      catch (error) { await rename(rollback, resolve(config.dataDir)); throw error; }
+      await rm(rollback, { recursive: true, force: true });
+      return printResult({ restored: true, path: resolve(path), summary }, true);
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+      await releaseLock();
+    }
+  }
+  throw new Error("backup command must be create, list, verify, or restore");
+}
+
+async function serviceCommand(argv: string[]): Promise<void> {
+  const action = argv[0] ?? "status";
+  const options = parseOptions(argv.slice(1));
+  const config = await loadConfig({ configPath: optionalString(options, "config"), dataDir: optionalString(options, "data-dir") });
+  if (action === "install") { await ensureRuntimeFiles(config); return printResult(await installSystemdService(config), true); }
+  if (action === "uninstall") return printResult(await uninstallSystemdService(), true);
+  if (action === "status") { const code = await systemdServiceStatus(); if (code !== 0) process.exitCode = code; return; }
+  throw new Error("service command must be install, status, or uninstall");
 }
 
 async function researchCommand(argv: string[]): Promise<void> {
@@ -692,6 +763,11 @@ Usage:
   nwp research add "QUESTION" [--urls URL,URL] [--max-sources N]
   nwp research list|get|cancel|retry [ID]
   nwp research run [ID]
+  nwp backup create [--output PATH]
+  nwp backup list [--backup-dir PATH]
+  nwp backup verify ARCHIVE
+  nwp backup restore ARCHIVE [--dry-run]
+  nwp service install|status|uninstall
   nwp trash list [--limit N] [--cursor CURSOR] [--json]
   nwp trash get|restore|purge ID [--json]
   nwp attachment add PAGE_ID PATH [--name FILENAME] [--json]

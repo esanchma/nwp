@@ -73,14 +73,17 @@ describe("complete export", () => {
     const compressed = Buffer.from(await new Response(archive.stream).arrayBuffer());
     const entries = await untar(gunzipSync(compressed));
     expect(entries.has("manifest.json")).toBe(true);
+    expect(entries.has("database/nwp.db")).toBe(true);
     expect(entries.has(`pages/${active.id}.md`)).toBe(true);
     expect(entries.has(`trash/${deleted.id}.md`)).toBe(true);
     expect([...entries.keys()].some((name) => name.startsWith(`history/${active.id}/`))).toBe(true);
     expect(entries.get(`attachments/${attachment.sha256}`)?.toString()).toBe("content");
     expect(entries.get(`documents/${document.currentVersion.sha256}`)?.toString()).toBe("document source");
     expect(entries.get(`web/${snapshot.blobSha256}`)?.toString()).toBe("<p>raw web source</p>");
-    const manifest = JSON.parse(entries.get("manifest.json")!.toString()) as { format: string; attachments: unknown[]; documents: unknown[]; webCaptures: unknown[]; research: unknown[] };
+    const manifest = JSON.parse(entries.get("manifest.json")!.toString()) as { format: string; version: number; database: { sha256: string }; attachments: unknown[]; documents: unknown[]; webCaptures: unknown[]; research: unknown[] };
     expect(manifest.format).toBe("nwp-export");
+    expect(manifest.version).toBe(2);
+    expect(manifest.database.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(manifest.attachments).toHaveLength(1);
     expect(manifest.documents).toHaveLength(2);
     expect(manifest.webCaptures).toHaveLength(1);

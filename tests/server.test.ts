@@ -62,7 +62,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.15.0" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.16.0" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });
@@ -295,7 +295,15 @@ describe("HTTP API", () => {
     }));
     expect(toolsResponse.status).toBe(200);
     const tools = await toolsResponse.json() as { result: { tools: Array<{ name: string }> } };
-    expect(tools.result.tools.map(({ name }) => name).sort()).toEqual(["acknowledge_document_review", "answer_question", "cancel_document_extraction", "cancel_research", "cancel_web_capture", "create_page", "define_tag", "delete_attachment", "delete_page", "document_ocr_status", "export_page", "get_attachment", "get_attachment_upload_instructions", "get_deleted_page", "get_document", "get_document_content", "get_document_upload_instructions", "get_full_export", "get_page", "get_page_tree", "get_research", "get_revision_diff", "get_web_capture", "import_page", "list_attachments", "list_documents", "list_pages", "list_research", "list_revisions", "list_tag_definitions", "list_trash", "list_web_captures", "purge_page", "queue_research", "queue_web_capture", "refresh_web_capture", "restore_page", "restore_revision", "retry_document_extraction", "retry_research", "retry_web_capture", "schedule_web_capture", "search_knowledge", "search_pages", "semantic_index_status", "update_page"]);
+    expect(tools.result.tools.map(({ name }) => name).sort()).toEqual(["acknowledge_document_review", "answer_question", "cancel_document_extraction", "cancel_research", "cancel_web_capture", "create_page", "define_tag", "delete_attachment", "delete_page", "document_ocr_status", "export_page", "get_attachment", "get_attachment_upload_instructions", "get_deleted_page", "get_document", "get_document_content", "get_document_upload_instructions", "get_full_export", "get_health", "get_page", "get_page_tree", "get_research", "get_revision_diff", "get_statistics", "get_web_capture", "import_page", "list_attachments", "list_documents", "list_pages", "list_research", "list_revisions", "list_tag_definitions", "list_trash", "list_web_captures", "purge_page", "queue_research", "queue_web_capture", "refresh_web_capture", "restore_page", "restore_revision", "retry_document_extraction", "retry_research", "retry_web_capture", "schedule_web_capture", "search_knowledge", "search_pages", "semantic_index_status", "update_page"]);
+
+    const healthResponse = await handler(request("/mcp", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "get_health", arguments: {} } }),
+    }));
+    const health = await healthResponse.json() as { result: { content: Array<{ text: string }> } };
+    expect(JSON.parse(health.result.content[0]!.text)).toMatchObject({ database: "ok", integrity: "ok" });
   });
 });
 

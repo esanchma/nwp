@@ -647,7 +647,7 @@ export class PageStore {
   readonly attachmentDir: string;
   private vectorAvailable = false;
 
-  constructor(dbPath: string) {
+  constructor(readonly dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
     this.attachmentDir = join(dirname(dbPath), "attachments");
     mkdirSync(this.attachmentDir, { recursive: true, mode: 0o700 });
@@ -1133,6 +1133,30 @@ export class PageStore {
 
   allResearch(): Array<ResearchJob & { sources: ResearchSource[] }> {
     return this.db.query<ResearchRow, []>("SELECT * FROM research_jobs ORDER BY id").all().map((row) => ({ ...hydrateResearch(row), sources: this.researchSources(row.id) }));
+  }
+
+  operationalStatistics(): Record<string, number> {
+    const count = (sql: string) => Number(this.db.query<{ count: number }, []>(sql).get()?.count ?? 0);
+    return {
+      activePages: count("SELECT count(*) AS count FROM pages WHERE deleted_at IS NULL"),
+      deletedPages: count("SELECT count(*) AS count FROM pages WHERE deleted_at IS NOT NULL"),
+      revisions: count("SELECT count(*) AS count FROM revisions"),
+      attachments: count("SELECT count(*) AS count FROM page_attachments"),
+      documents: count("SELECT count(*) AS count FROM documents"),
+      webCaptures: count("SELECT count(*) AS count FROM web_captures"),
+      researchJobs: count("SELECT count(*) AS count FROM research_jobs"),
+      pendingDocumentJobs: count("SELECT count(*) AS count FROM document_jobs"),
+      pendingWebCaptureJobs: count("SELECT count(*) AS count FROM web_capture_jobs"),
+      pendingResearchJobs: count("SELECT count(*) AS count FROM research_queue"),
+      pendingSemanticJobs: count("SELECT count(*) AS count FROM semantic_index_queue") + count("SELECT count(*) AS count FROM document_semantic_queue"),
+      blobCount: count("SELECT count(*) AS count FROM attachment_blobs"),
+      blobBytes: Number(this.db.query<{ bytes: number }, []>("SELECT coalesce(sum(size), 0) AS bytes FROM attachment_blobs").get()?.bytes ?? 0),
+    };
+  }
+
+  healthStatus(): { database: "ok" | "error"; integrity: string; statistics: Record<string, number> } {
+    const integrity = this.db.query<{ quick_check: string }, []>("PRAGMA quick_check").get()?.quick_check ?? "no result";
+    return { database: integrity === "ok" ? "ok" : "error", integrity, statistics: this.operationalStatistics() };
   }
 
   attachmentFilePath(sha256: string): string {

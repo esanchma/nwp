@@ -26,7 +26,7 @@ export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSear
 
 function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig, answerConfig?: RagAnswerConfig, webConfig?: WebCaptureConfig, researchConfig?: ResearchConfig): McpServer {
   const embedder = semanticConfig?.enabled ? new OllamaEmbedder(semanticConfig) : null;
-  const server = new McpServer({ name: "nwp", version: "0.15.0" });
+  const server = new McpServer({ name: "nwp", version: "0.16.0" });
   const statusSchema = z.enum(["draft", "published", "archived"]);
   const statusFilterSchema = z.enum(["draft", "published", "archived", "all"]);
   const propertiesSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]));
@@ -148,6 +148,18 @@ function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, d
       inputSchema: { tag: z.string(), kind: z.enum(["topic", "entity", "source", "type", "custom"]), display_name: z.string(), aliases: z.array(z.string()).default([]), description: z.string().nullable().default(null) },
     },
     async ({ tag, kind, display_name, aliases, description }) => toolResult(store.defineTag(tag, kind, display_name, aliases, description)),
+  );
+
+  server.registerTool(
+    "get_statistics",
+    { description: "Get wiki content, durable queue, and blob-storage statistics", inputSchema: {}, annotations: { readOnlyHint: true } },
+    async () => toolResult(store.operationalStatistics()),
+  );
+
+  server.registerTool(
+    "get_health",
+    { description: "Run a SQLite quick check and return operational queue statistics", inputSchema: {}, annotations: { readOnlyHint: true } },
+    async () => toolResult(store.healthStatus()),
   );
 
   server.registerTool(

@@ -71,7 +71,7 @@ timeout_seconds = 30
 max_redirects = 5
 max_response_bytes = 20971520
 max_extracted_characters = 2000000
-user_agent = "nwp/0.15 (+local knowledge capture)"
+user_agent = "nwp/0.16 (+local knowledge capture)"
 
 [research]
 enabled = true
@@ -174,6 +174,13 @@ Page commands connect to the running local server and read the generated token a
 ./dist/nwp export page 1 --output installation-guide.md
 ./dist/nwp import installation-guide.md
 ./dist/nwp export all --output nwp-export.tar.gz
+./dist/nwp backup create
+./dist/nwp backup list
+./dist/nwp backup verify ./nwp-export.tar.gz
+./dist/nwp backup restore ./nwp-export.tar.gz --dry-run
+./dist/nwp backup restore ./nwp-export.tar.gz
+./dist/nwp service install
+./dist/nwp service status
 ```
 
 Use `--body-file -` to read Markdown from stdin. Add `--json` for machine-readable output. Remote or non-default clients can pass `--endpoint`, `--token`, and `--config`.
@@ -269,6 +276,8 @@ Tools:
 - `get_page_tree`
 - `list_tag_definitions`
 - `define_tag`
+- `get_statistics`
+- `get_health`
 - `semantic_index_status`
 - `list_documents`
 - `document_ocr_status`
@@ -320,9 +329,16 @@ A complete export is a streaming `tar.gz` containing:
 - each deduplicated attachment blob under `attachments/`;
 - original document versions under `documents/`;
 - retained raw web responses under `web/`;
-- `manifest.json` with format version, associations, taxonomy, document parser metadata, web capture provenance, and research results.
+- an integrity-protected SQLite snapshot under `database/`;
+- `manifest.json` with format version, SHA-256 metadata, associations, taxonomy, document parser metadata, web capture provenance, and research results.
 
-The archive is intended for portable backup and inspection. Page import accepts individual Markdown documents; restoring a complete archive into a database is part of the upcoming operational backup/restore tooling.
+Format version 2 archives support exact restoration. `nwp backup verify` applies path, file-type, entry-count, expanded-byte, declared-size, SHA-256, SQLite integrity, foreign-key, and referenced-blob checks. `nwp backup restore --dry-run` builds and validates a disposable restored data directory without changing the current installation.
+
+A real restore requires the server and workers to be stopped. nwp takes the instance lock, creates an automatic pre-restore archive in the sibling `nwp-backups/` directory, builds the restored database in a staging directory, preserves the API token, and atomically swaps data directories. If the swap fails, the previous directory is moved back into place.
+
+## Service operation
+
+`nwp service install` writes and enables a hardened systemd user unit for the current executable and configured paths. It runs `nwp serve --with-worker`, restarts on failure, uses a private temporary directory, makes the system read-only, and grants write access only to the nwp data directory. Use `nwp service status` to inspect it and `nwp service uninstall` to stop and remove it.
 
 ## States, properties, and hierarchy
 

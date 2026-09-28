@@ -1,4 +1,4 @@
-import { createReadStream, statSync } from "node:fs";
+import { createReadStream, statSync, unlinkSync } from "node:fs";
 import { Readable } from "node:stream";
 import { createGzip } from "node:zlib";
 import tar from "tar-stream";
@@ -101,16 +101,21 @@ export function createFullExport(store: PageStore): { stream: ReadableStream; fi
   const research = store.allResearch();
   const taxonomy = store.listTagDefinitions();
   const generatedAt = new Date().toISOString();
+  const databasePath = `${store.dbPath}.export-${process.pid}-${crypto.randomUUID()}`;
+  store.db.run("VACUUM INTO ?", [databasePath]);
   const pack = tar.pack();
   const gzip = createGzip({ level: 6 });
   const output = pack.pipe(gzip);
 
   void (async () => {
     try {
+      const databaseSize = statSync(databasePath).size;
+      const databaseHash = await hashFile(databasePath);
       const manifest = {
         format: "nwp-export",
-        version: 1,
+        version: 2,
         generatedAt,
+        database: { path: "database/nwp.db", sha256: databaseHash, size: databaseSize },
         pages: active.map((page) => ({ id: page.id, alias: page.alias, path: `pages/${page.id}.md` })),
         trash: trash.map((page) => ({ id: page.id, alias: page.alias, deletedAt: page.deletedAt, path: `trash/${page.id}.md` })),
         revisions: revisions.map((revision) => ({ id: revision.id, pageId: revision.pageId, path: `history/${revision.pageId}/${revision.id}.md` })),
@@ -121,6 +126,7 @@ export function createFullExport(store: PageStore): { stream: ReadableStream; fi
         taxonomy,
       };
       await addBuffer(pack, "manifest.json", `${JSON.stringify(manifest, null, 2)}\n`);
+      await addFile(pack, "database/nwp.db", databasePath);
       for (const page of active) await addBuffer(pack, `pages/${page.id}.md`, exportPageMarkdown(page));
       for (const page of trash) await addBuffer(pack, `trash/${page.id}.md`, exportPageMarkdown(page));
       for (const revision of revisions) await addBuffer(pack, `history/${revision.pageId}/${revision.id}.md`, exportRevisionMarkdown(revision));
@@ -136,6 +142,8 @@ export function createFullExport(store: PageStore): { stream: ReadableStream; fi
       pack.finalize();
     } catch (error) {
       pack.destroy(error as Error);
+    } finally {
+      try { unlinkSync(databasePath); } catch { /* The stream reports the primary export error. */ }
     }
   })();
 
@@ -150,7 +158,7 @@ function markdownDocument(frontMatter: FrontMatter, body: string): string {
   return `---\n${yaml}\n---\n${body}`;
 }
 
-function addBuffer(pack: tar.Pack, name: string, value: string): Promise<void> {
+function addBuffer(pack: tar.Pack, name: string, value: string | Uint8Array): Promise<void> {
   return new Promise((resolve, reject) => {
     pack.entry({ name, mode: 0o600, mtime: new Date(0) }, Buffer.from(value), (error) => error ? reject(error) : resolve());
   });
@@ -164,6 +172,12 @@ function addFile(pack: tar.Pack, name: string, path: string): Promise<void> {
     entry.on("error", reject);
     source.pipe(entry);
   });
+}
+
+async function hashFile(path: string): Promise<string> {
+  const hasher = new Bun.CryptoHasher("sha256");
+  for await (const chunk of createReadStream(path)) hasher.update(chunk as Buffer);
+  return hasher.digest("hex") as string;
 }
 
 function requiredString(value: unknown, field: string): string {
