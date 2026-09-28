@@ -14,7 +14,7 @@ Este documento resume la evaluación de modelos locales de Ollama para un proyec
 
 La captura web de `nwp` delega por defecto la descarga y la limpieza en `web-research`. Esta dependencia evita mantener dos implementaciones para transportes compatibles con navegadores, extracción de artículos, transcripciones de YouTube e hilos de X. `nwp` selecciona uno de los modos `trafilatura`, `readable`, `defuddle` o `raw`, limita el tiempo y la salida del proceso, conserva su sobre de procedencia y trata el resultado como contenido no confiable.
 
-`nwp` mantiene el trabajo propio de su dominio: trabajos duraderos, instantáneas y versiones, descarga segura de imágenes, indexación, recuperación y citas. El modelo se encarga de resumir, clasificar y sintetizar evidencia ya extraída.
+`web-research` conserva opcionalmente la posición de las imágenes como referencias Markdown, sin descargarlas. `nwp` mantiene el trabajo propio de su dominio: trabajos duraderos, instantáneas y versiones, descarga segura de esas imágenes, indexación, recuperación y citas. El modelo se encarga de resumir, clasificar y sintetizar evidencia ya extraída.
 
 ## Entorno evaluado
 

@@ -163,7 +163,7 @@ export async function fetchPublicWebPage(value: string, config: WebCaptureConfig
 
 async function fetchWithWebResearch(value: string, config: WebCaptureConfig): Promise<FetchedWebPage> {
   const requestedUrl = normalizeWebUrl(value);
-  const process = Bun.spawn([config.fetchCommand, "fetch", requestedUrl, `--mode=${config.fetchMode}`], { stdout: "pipe", stderr: "pipe", env: { ...processEnv(), WEB_RESEARCH_NO_CACHE: "1" } });
+  const process = Bun.spawn([config.fetchCommand, "fetch", requestedUrl, `--mode=${config.fetchMode}`, "--images=references"], { stdout: "pipe", stderr: "pipe", env: { ...processEnv(), WEB_RESEARCH_NO_CACHE: "1" } });
   const timer = setTimeout(() => process.kill(), config.fetchTimeoutSeconds * 1000);
   try {
     const [stdout, stderr, exitCode] = await Promise.all([
@@ -184,12 +184,8 @@ async function fetchWithWebResearch(value: string, config: WebCaptureConfig): Pr
     }
     const body = parsed.body.trim();
     if (!body) throw new AppError("empty_web_content", "web-research returned no extracted content", 422);
-    const delegatedHtml = /<(?:article|main|section|div|p|h[1-6]|img)\b/i.test(body);
-    const prepared = delegatedHtml
-      ? extractWebContent(new TextEncoder().encode(body), "text/html", requestedUrl, config.maxExtractedCharacters)
-      : extractMarkdownAssetReferences(body, requestedUrl);
+    const prepared = extractMarkdownAssetReferences(body, requestedUrl);
     let markdown = prepared.markdown;
-    if (delegatedHtml && title) markdown = markdown.replace(/^#\s+[^\n]+/, `# ${title.replace(/[\r\n#\[\]\\]/g, " ").replace(/\s+/g, " ").trim()}`);
     if (!/^Source:\s+/mi.test(markdown)) markdown = `Source: ${requestedUrl}\n\n${markdown}`;
     if (markdown.length > config.maxExtractedCharacters) throw new AppError("web_content_too_large", `extracted content exceeds the ${config.maxExtractedCharacters} character guard`, 413);
     const captured = await captureWebAssets(markdown, prepared.assets, config);

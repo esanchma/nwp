@@ -13,7 +13,7 @@ describe("OpenAPI contract", () => {
   test("is a valid OpenAPI 3.1 document", async () => {
     const validated = await SwaggerParser.validate(structuredClone(openApiDocument) as never) as unknown as { openapi: string; info: { version: string } };
     expect(validated.openapi).toBe("3.1.0");
-    expect(validated.info.version).toBe("0.20.0");
+    expect(validated.info.version).toBe("0.20.1");
   });
 
   test("documents every JSON API operation with unique operation IDs", () => {
