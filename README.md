@@ -71,7 +71,7 @@ timeout_seconds = 30
 max_redirects = 5
 max_response_bytes = 20971520
 max_extracted_characters = 2000000
-user_agent = "nwp/0.17 (+local knowledge capture)"
+user_agent = "nwp/0.18 (+local knowledge capture)"
 
 [research]
 enabled = true
@@ -112,7 +112,9 @@ Link to another page with its alias:
 Read the [[installation-guide]].
 ```
 
-A missing target appears as a red link that opens a prefilled creation form. Existing pages show backlinks below their content.
+A missing target appears as a red link that opens a prefilled creation form. Every page includes contextual navigation for children, outgoing wiki-links, backlinks, and pages related by shared tags.
+
+**Explore** provides a server-rendered navigation dashboard with recently updated pages, most-linked pages, unconnected roots, popular tags, and a direct path to the complete page tree. Draft and archived pages remain visibly labeled.
 
 ## CLI
 

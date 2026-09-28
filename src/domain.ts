@@ -62,6 +62,27 @@ export interface PageReference {
   alias: string;
 }
 
+export interface PageLinkReference {
+  id: number | null;
+  title: string | null;
+  alias: string;
+  state: "active" | "deleted" | "missing";
+}
+
+export interface RelatedPage extends PageSummary {
+  sharedTags: string[];
+}
+
+export interface LinkedPageSummary extends PageSummary {
+  incomingLinks: number;
+}
+
+export interface ExploreOverview {
+  recent: PageSummary[];
+  mostLinked: LinkedPageSummary[];
+  unconnected: PageSummary[];
+}
+
 export interface DeletedPage extends Page {
   deletedAt: string;
 }

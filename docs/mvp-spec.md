@@ -71,7 +71,8 @@ Required views:
 
 - `/`: recently modified pages;
 - `/pages`: all pages;
-- `/wiki/:alias`: rendered page, tags, and backlinks;
+- `/explore`: recent, highly linked, unconnected, hierarchical, and tag-based navigation;
+- `/wiki/:alias`: rendered page, tags, contextual relationships, and backlinks;
 - `/new`: create page;
 - `/wiki/:alias/edit`: edit page;
 - `/tags`: tag index;
@@ -250,18 +251,16 @@ Version 0.16 adds exact complete-archive recovery. Export format 2 includes an i
 
 Version 0.17 adds a responsive side-by-side Markdown editor and preview for page creation and editing. Initial preview remains server-rendered without JavaScript; a small same-origin script progressively adds debounced live updates through a CSRF-protected endpoint, wiki-link resolution, formatting controls, character count, unsaved-change protection, and Ctrl/Command+S. Preview output uses the same GFM renderer and HTML sanitizer as saved pages under a restrictive Content Security Policy.
 
+Version 0.18 adds richer server-rendered navigation. The Explore dashboard surfaces recent activity, highly linked pages, unconnected roots, popular tags, and the full hierarchy. Each page exposes its immediate neighborhood: child pages, outgoing active, deleted, or missing wiki-links, backlinks, and pages related through shared tags. Publication states remain visible, responsive cards collapse cleanly on small screens, and every destination has a stable shareable URL without requiring JavaScript.
+
 ## Roadmap
 
-The following decisions describe the remaining product vision and do not expand the original MVP scope. Work proceeds in the priority order shown: user experience first, then portability, then operations.
+The following decisions describe the remaining product vision and do not expand the original MVP scope. The prioritized user-experience work was completed in versions 0.17 and 0.18; work now proceeds through portability and then operations.
 
-### Priority 1: content and navigation
-
-- richer navigation beyond the page tree and breadcrumbs.
-
-### Priority 2: files and portability
+### Priority 1: files and portability
 
 - selective restore and cross-instance merge workflows.
 
-### Priority 3: interfaces and operation
+### Priority 2: interfaces and operation
 
 - guided diagnostics and maintenance scheduling.

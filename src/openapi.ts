@@ -14,7 +14,7 @@ export const openApiDocument = {
   openapi: "3.1.0",
   info: {
     title: "nwp JSON API",
-    version: "0.17.0",
+    version: "0.18.0",
     description: "Local API for nano-wiki-pi. SQLite metadata is authoritative and every endpoint requires the generated Bearer token.",
     license: { name: "MIT", identifier: "MIT" },
   },

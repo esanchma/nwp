@@ -45,6 +45,29 @@ describe("PageStore", () => {
     expect(db.getById(target.id).backlinks.map(({ alias }) => alias)).toEqual(["source"]);
   });
 
+  test("builds contextual navigation and exploration summaries", async () => {
+    const db = await store();
+    const root = db.create({ title: "Root", body: "[[active-target]] [[deleted-target]] [[missing-target]]", tags: ["shared", "root"] }, "web");
+    const child = db.create({ title: "Child", body: "", tags: [], parentId: root.id }, "web");
+    const active = db.create({ title: "Active Target", body: "", tags: ["shared", "root"] }, "web");
+    const deleted = db.create({ title: "Deleted Target", body: "", tags: [] }, "web");
+    db.deletePage(deleted.id);
+    const lessRelated = db.create({ title: "Less Related", body: "", tags: ["shared"] }, "web");
+
+    expect(db.pageChildren(root.id).map(({ id }) => id)).toEqual([child.id]);
+    expect(db.outgoingPageLinks(root.id)).toEqual([
+      { id: active.id, title: "Active Target", alias: "active-target", state: "active" },
+      { id: deleted.id, title: "Deleted Target", alias: "deleted-target", state: "deleted" },
+      { id: null, title: null, alias: "missing-target", state: "missing" },
+    ]);
+    expect(db.relatedPages(root.id).map(({ id }) => id)).toEqual([active.id, lessRelated.id]);
+    expect(db.relatedPages(root.id)[0]?.sharedTags).toEqual(["root", "shared"]);
+    const overview = db.exploreOverview();
+    expect(overview.mostLinked[0]).toMatchObject({ id: active.id, incomingLinks: 1 });
+    expect(overview.unconnected.map(({ id }) => id)).toContain(root.id);
+    expect(overview.unconnected.map(({ id }) => id)).not.toContain(active.id);
+  });
+
   test("stores one revision only for meaningful updates", async () => {
     const db = await store();
     const page = db.create({ title: "Page", body: "one", tags: ["a"] }, "web");

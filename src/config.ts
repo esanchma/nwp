@@ -141,7 +141,7 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     maxRedirects: numberValue(web.max_redirects, "web_capture.max_redirects", 5),
     maxResponseBytes: numberValue(web.max_response_bytes, "web_capture.max_response_bytes", 20 * 1024 * 1024),
     maxExtractedCharacters: numberValue(web.max_extracted_characters, "web_capture.max_extracted_characters", 2_000_000),
-    userAgent: stringValue(web.user_agent, "web_capture.user_agent", "nwp/0.17 (+local knowledge capture)"),
+    userAgent: stringValue(web.user_agent, "web_capture.user_agent", "nwp/0.18 (+local knowledge capture)"),
   };
   const researchInput = objectValue(file.research, "research");
   const research: ResearchConfig = {

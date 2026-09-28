@@ -29,12 +29,16 @@ import {
   type OcrStatus,
   type Page,
   type PageInput,
+  type ExploreOverview,
+  type LinkedPageSummary,
+  type PageLinkReference,
   type PageList,
   type PageProperties,
   type PageStatus,
   type PageReference,
   type PageSummary,
   type PageUpdate,
+  type RelatedPage,
   type Revision,
   type RevisionList,
   type RevisionSummary,
@@ -1087,6 +1091,64 @@ export class PageStore {
     return this.db
       .query<{ tag: string; count: number }, []>("SELECT pt.tag, COUNT(*) AS count FROM page_tags pt JOIN pages p ON p.id = pt.page_id WHERE p.deleted_at IS NULL AND p.status = 'published' GROUP BY pt.tag COLLATE NOCASE ORDER BY pt.tag COLLATE NOCASE")
       .all();
+  }
+
+  pageChildren(pageId: number): PageSummary[] {
+    this.getById(pageId);
+    return this.db.query<PageRow, [number]>("SELECT * FROM pages WHERE parent_id = ? AND deleted_at IS NULL ORDER BY title COLLATE NOCASE").all(pageId).map((row) => this.summary(row));
+  }
+
+  outgoingPageLinks(pageId: number): PageLinkReference[] {
+    this.getById(pageId);
+    const rows = this.db.query<{ alias: string; active_id: number | null; active_title: string | null; deleted_id: number | null; deleted_title: string | null }, [number]>(`
+      SELECT l.target_alias AS alias, active.id AS active_id, active.title AS active_title,
+        (SELECT deleted.id FROM pages deleted WHERE deleted.deleted_at IS NOT NULL AND deleted.deleted_alias = l.target_alias COLLATE NOCASE ORDER BY deleted.deleted_at DESC LIMIT 1) AS deleted_id,
+        (SELECT deleted.title FROM pages deleted WHERE deleted.deleted_at IS NOT NULL AND deleted.deleted_alias = l.target_alias COLLATE NOCASE ORDER BY deleted.deleted_at DESC LIMIT 1) AS deleted_title
+      FROM page_links l LEFT JOIN pages active ON active.deleted_at IS NULL AND active.alias = l.target_alias COLLATE NOCASE
+      WHERE l.source_page_id = ? ORDER BY l.target_alias COLLATE NOCASE
+    `).all(pageId);
+    return rows.map((row) => row.active_id !== null
+      ? { id: row.active_id, title: row.active_title, alias: row.alias, state: "active" }
+      : row.deleted_id !== null
+        ? { id: row.deleted_id, title: row.deleted_title, alias: row.alias, state: "deleted" }
+        : { id: null, title: null, alias: row.alias, state: "missing" });
+  }
+
+  relatedPages(pageId: number, limitValue = 8): RelatedPage[] {
+    const page = this.getById(pageId);
+    if (!page.tags.length) return [];
+    const limit = Math.max(1, Math.min(50, Math.trunc(limitValue)));
+    const rows = this.db.query<{ id: number; shared_count: number }, [number, number]>(`
+      SELECT other.page_id AS id, count(*) AS shared_count
+      FROM page_tags mine JOIN page_tags other ON other.tag = mine.tag COLLATE NOCASE
+      JOIN pages p ON p.id = other.page_id
+      WHERE mine.page_id = ? AND other.page_id != ? AND p.deleted_at IS NULL
+      GROUP BY other.page_id ORDER BY shared_count DESC, p.updated_at DESC, p.title COLLATE NOCASE LIMIT ${limit}
+    `).all(pageId, pageId);
+    const ownTags = new Set(page.tags);
+    return rows.map(({ id }) => {
+      const related = this.getById(id);
+      return { id: related.id, title: related.title, alias: related.alias, tags: related.tags, status: related.status, parentId: related.parentId, createdAt: related.createdAt, updatedAt: related.updatedAt, sharedTags: related.tags.filter((tag) => ownTags.has(tag)) };
+    });
+  }
+
+  exploreOverview(limitValue = 10): ExploreOverview {
+    const limit = Math.max(1, Math.min(50, Math.trunc(limitValue)));
+    const recent = this.db.query<PageRow, []>(`SELECT * FROM pages WHERE deleted_at IS NULL ORDER BY updated_at DESC, id DESC LIMIT ${limit}`).all().map((row) => this.summary(row));
+    const linkedRows = this.db.query<PageRow & { incoming_links: number }, []>(`
+      SELECT p.*, count(DISTINCT source.id) AS incoming_links FROM pages p
+      JOIN page_links l ON l.target_alias = p.alias COLLATE NOCASE
+      JOIN pages source ON source.id = l.source_page_id AND source.deleted_at IS NULL
+      WHERE p.deleted_at IS NULL GROUP BY p.id
+      ORDER BY incoming_links DESC, p.updated_at DESC, p.title COLLATE NOCASE LIMIT ${limit}
+    `).all();
+    const mostLinked: LinkedPageSummary[] = linkedRows.map((row) => ({ ...this.summary(row), incomingLinks: row.incoming_links }));
+    const unconnected = this.db.query<PageRow, []>(`
+      SELECT p.* FROM pages p WHERE p.deleted_at IS NULL AND p.parent_id IS NULL
+      AND NOT EXISTS (SELECT 1 FROM page_links l JOIN pages source ON source.id = l.source_page_id AND source.deleted_at IS NULL WHERE l.target_alias = p.alias COLLATE NOCASE)
+      ORDER BY p.updated_at DESC, p.title COLLATE NOCASE LIMIT ${limit}
+    `).all().map((row) => this.summary(row));
+    return { recent, mostLinked, unconnected };
   }
 
   pagesForTag(tag: string): PageSummary[] {

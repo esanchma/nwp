@@ -62,7 +62,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.17.0" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.18.0" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });
@@ -384,6 +384,30 @@ describe("web", () => {
     const tree = await (await handler(request("/tree?status=all"))).text();
     expect(tree).toContain("Web Child");
     expect(tree).toContain("--depth:1");
+  });
+
+  test("renders exploration and contextual page navigation", async () => {
+    store.create({ title: "Navigation Target", body: "", tags: [] }, "web");
+    const root = store.create({ title: "Navigation Root", body: "See [[navigation-target]].", tags: ["shared"] }, "web");
+    store.create({ title: "Navigation Child", body: "", tags: [], parentId: root.id }, "web");
+    store.create({ title: "Navigation Related", body: "", tags: ["shared"] }, "web");
+    store.create({ title: "Navigation Source", body: "Back to [[navigation-root]].", tags: [] }, "web");
+
+    const page = await (await handler(request("/wiki/navigation-root"))).text();
+    expect(page).toContain("Navigate from this page");
+    expect(page).toContain("Navigation Child");
+    expect(page).toContain("Navigation Target");
+    expect(page).toContain("Navigation Related");
+    expect(page).toContain("Navigation Source");
+
+    const explore = await (await handler(request("/explore"))).text();
+    expect(explore).toContain("Recently updated");
+    expect(explore).toContain("Most linked");
+    expect(explore).toContain("Unconnected pages");
+    expect(explore).toContain("Popular tags");
+    expect(explore).toContain("Navigation Root");
+    expect(explore).toContain('href="/tree?status=all"');
+    expect(explore).toContain('href="/explore"');
   });
 
   test("renders revision history and side-by-side diff", async () => {
