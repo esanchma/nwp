@@ -27,7 +27,7 @@ beforeEach(async () => {
     attachmentMaxBytes: null,
     semanticSearch: { enabled: false, ollamaUrl: "http://127.0.0.1:11434", embeddingModel: "bge-m3", embeddingDimensions: 1024, queryPrefix: "", chunkCharacters: 1600, chunkOverlap: 200 },
     ragAnswer: { enabled: false, ollamaUrl: "http://127.0.0.1:11434", generationModel: "qwen3:8b", timeoutSeconds: 120, maxEvidenceItems: 8, maxEvidenceCharacters: 6000, maxPromptCharacters: 50_000, maxAnswerCharacters: 12_000, includeGeneralKnowledge: true },
-    webCapture: { enabled: true, timeoutSeconds: 30, maxRedirects: 5, maxResponseBytes: 20_000_000, maxExtractedCharacters: 2_000_000, maxAssetCount: 50, maxAssetBytes: 10_000_000, maxTotalAssetBytes: 50_000_000, userAgent: "nwp-test" },
+    webCapture: { enabled: true, timeoutSeconds: 30, maxRedirects: 5, maxResponseBytes: 20_000_000, maxExtractedCharacters: 2_000_000, maxAssetCount: 50, maxAssetBytes: 10_000_000, maxTotalAssetBytes: 50_000_000, fetchCommand: "", fetchMode: "trafilatura", fetchTimeoutSeconds: 180, maxFetchOutputBytes: 20_000_000, userAgent: "nwp-test" },
     research: { enabled: true, searchCommand: "", searchTimeoutSeconds: 60, maxSearchOutputBytes: 2_000_000, defaultMaxSources: 5, maximumSources: 20 },
     documentRag: { enabled: true, maxFileBytes: 10_000_000, maxExpandedBytes: 50_000_000, maxArchiveEntries: 10_000, maxCompressionRatio: 1000, maxPdfPages: 10_000, maxSpreadsheetCells: 5_000_000, ocrEnabled: false, tesseractCommand: "tesseract", pdfRendererCommand: "pdftoppm", ocrLanguages: ["spa", "eng"], ocrTimeoutSeconds: 120, maxOcrItems: 10_000, maxOcrOutputCharacters: 1_000_000 },
   };
@@ -62,7 +62,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.19.1" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.20.0" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });

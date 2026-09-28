@@ -6,7 +6,7 @@ nwp supports page creation, reading, listing, editing, hybrid full-text and sema
 
 ## Requirements
 
-Building requires Bun 1.4 or newer on Linux x86-64. The compiled executable does not require Bun at runtime. Hybrid search and answers require a local Ollama service with the configured models; the defaults can be installed with `ollama pull bge-m3` and `ollama pull qwen3:8b`. Document OCR is optional and uses local `tesseract` plus the `spa` and `eng` language packs. OCR of scanned PDF pages also requires `pdftoppm` from Poppler. Ingestion remains available when these programs are absent.
+Building requires Bun 1.4 or newer on Linux x86-64. The compiled executable does not require Bun at runtime. Web capture uses the `web-research` executable from `~/.pi/agent/skills/web-research/web-research` or `PATH` by default; set `web_capture.fetch_command = ""` to use nwp's native transport instead. Hybrid search and answers require a local Ollama service with the configured models; the defaults can be installed with `ollama pull bge-m3` and `ollama pull qwen3:8b`. Document OCR is optional and uses local `tesseract` plus the `spa` and `eng` language packs. OCR of scanned PDF pages also requires `pdftoppm` from Poppler. Ingestion remains available when these programs are absent.
 
 ## Build and test
 
@@ -74,11 +74,15 @@ max_extracted_characters = 2000000
 max_asset_count = 50
 max_asset_bytes = 10485760
 max_total_asset_bytes = 52428800
-user_agent = "nwp/0.19 (+local knowledge capture)"
+fetch_command = "/home/user/.pi/agent/skills/web-research/web-research" # defaults to the installed skill or web-research on PATH; empty forces native HTTP
+fetch_mode = "readable" # trafilatura, readable, defuddle, or raw
+fetch_timeout_seconds = 180
+max_fetch_output_bytes = 20971520
+user_agent = "nwp/0.20 (+local knowledge capture)"
 
 [research]
 enabled = true
-search_command = "" # optional path to the web-research executable
+search_command = "" # defaults to web_capture.fetch_command
 search_timeout_seconds = 60
 max_search_output_bytes = 2097152
 default_max_sources = 5
@@ -382,19 +386,21 @@ Office archives are parsed without executing macros, formulas, or external conne
 
 ## Web capture
 
-Queue a public page from `/web-captures`, `nwp web add`, REST, or MCP. The durable worker fetches it, retains the exact raw response as a content-addressed snapshot, extracts bounded Markdown, captures supported raster images in document order, and sends the Markdown through the existing document extraction and semantic indexing pipeline. Each capture receives a linked wiki page with `source:web`, `type:web-capture`, and a `web.url` property. Once both workers finish, captured content participates in document search, cited answers, and complete exports.
+Queue a public page from `/web-captures`, `nwp web add`, REST, or MCP. When `web_capture.fetch_command` is empty, the durable worker uses nwp's native HTTP transport and deterministic extractor. When it points to `web-research`, nwp delegates page retrieval and extraction as `fetch URL --mode=MODE`, accepts its bounded untrusted-content envelope, and stores the resulting content as a content-addressed snapshot. Both paths send Markdown through the existing document extraction and semantic indexing pipeline. Each capture receives a linked wiki page with `source:web`, `type:web-capture`, and a `web.url` property. Once both workers finish, captured content participates in document search, cited answers, and complete exports.
 
-Network access is deliberately narrow: only HTTP(S) is allowed; URL credentials, localhost, private, loopback, link-local, multicast, documentation, and reserved addresses are blocked. nwp resolves every redirect independently, rejects any hostname with a non-public DNS answer, pins the validated address for the connection, sends no cookies or credentials, accepts only textual content, disables compression, and enforces redirect, timeout, response-byte, and extracted-character guards. Web content remains untrusted evidence and cannot issue model or tool instructions.
+The native transport retains nwp's strict public-network policy: it validates DNS and every redirect, pins public addresses, sends no credentials, and applies transport limits. Delegated mode intentionally trusts `web-research` and its transports, redirects, cache policy, and specialized tools. nwp still validates the submitted URL, invokes the configured executable without a shell, bounds time and output, parses only the expected envelope, and treats all returned content as untrusted evidence.
 
-Captured images use the same public-network checks as the page request. nwp validates each redirect and DNS answer, pins the selected public address, checks the file signature, and enforces per-image, aggregate-byte, and item-count limits. Images are immutable SHA-256-addressed blobs associated with one snapshot. The content viewer serves only these local resources; it never loads remote images or accepts data URLs. **Export article and resources** produces a `tar.gz` with `article.md` and a relative `resources/` directory.
+Captured images always use nwp's native public-network checks, including when page extraction is delegated. nwp validates each redirect and DNS answer, pins the selected public address, checks the file signature, and enforces per-image, aggregate-byte, and item-count limits. Images are immutable SHA-256-addressed blobs associated with one snapshot. The content viewer serves only these local resources; it never loads remote images or accepts data URLs. **Export article and resources** produces a `tar.gz` with `article.md` and a relative `resources/` directory.
 
-A failed capture retries with a leased SQLite job up to three times. Cancellation and retry are explicit. Existing captures can be refreshed manually or hourly, daily, weekly, or at another interval of at least five minutes. Refresh requests use retained `ETag` and `Last-Modified` validators. HTTP 304 and byte-identical responses do not create document versions; changed responses retain a new raw snapshot and queue an explicit document version while preserving human page edits.
+The delegated extractor supports `trafilatura`, `readable`, `defuddle`, and `raw`. Non-raw requests automatically use the `web-research` paths for YouTube transcripts and X threads. A compatible `web-research` build honors `WEB_RESEARCH_NO_CACHE=1` for authoritative refreshes. The `raw` mode delegates retrieval but applies nwp's HTML-to-Markdown extraction afterward.
 
-Run capture with `nwp worker`, `nwp serve --with-worker`, or the one-shot `nwp web run`. The extractor remains deterministic and native; browser-rendered and authenticated pages are intentionally outside this release.
+A failed capture retries with a leased SQLite job up to three times. Cancellation and retry are explicit. Existing captures can be refreshed manually or on a schedule. Native refreshes retain conditional HTTP validators; delegated refreshes rerun `web-research`. Byte-identical results do not create document versions.
+
+Run capture with `nwp worker`, `nwp serve --with-worker`, or the one-shot `nwp web run`.
 
 ## Multi-source research
 
-Research jobs combine source discovery, secure capture, document extraction, retrieval, and citation-grounded synthesis in one durable workflow. Supply URLs explicitly or configure `research.search_command` with the path to the `web-research` executable. nwp invokes only its `search` operation without a shell, parses URL records from bounded output, and passes every result through the same public-network policy. The external adapter never performs the authoritative capture.
+Research jobs combine source discovery, capture, document extraction, retrieval, and citation-grounded synthesis in one durable workflow. Supply URLs explicitly or configure the `web-research` executable. `research.search_command` defaults to `web_capture.fetch_command`; nwp invokes its `search` operation without a shell and parses URL records from bounded output. Captures then use the configured native or delegated transport.
 
 Each research job records its selected captures, waits for usable document versions, restricts retrieval to those exact documents, and stores the validated answer and citations. Jobs have leases, retry and cancellation semantics and are available through `/research`, CLI, REST, MCP, and complete exports. General model knowledge is disabled for research synthesis.
 
@@ -446,7 +452,7 @@ The main modules are:
 
 - `src/database.ts`: migrations and page/document persistence
 - `src/documents.ts`: safe document detection, extraction, and durable worker
-- `src/web.ts`: SSRF-resistant HTTP capture, conditional refresh, deterministic extraction, and durable worker
+- `src/web.ts`: native or delegated web capture, local image capture, bounded extraction, and durable worker
 - `src/research.ts`: bounded source discovery and durable multi-source cited synthesis
 - `src/domain.ts`: validation and domain rules
 - `src/server.ts`: web and JSON HTTP handlers

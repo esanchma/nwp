@@ -40,7 +40,7 @@ async function main(argv: string[]): Promise<void> {
   if (command === "worker") return workerCommand(argv.slice(1));
   if (command === "index") return indexCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") return printHelp();
-  if (command === "--version" || command === "-v") return console.log("nwp 0.19.1");
+  if (command === "--version" || command === "-v") return console.log("nwp 0.20.0");
   throw new Error(`unknown command '${command}'. Run 'nwp help'.`);
 }
 

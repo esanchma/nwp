@@ -41,6 +41,8 @@ export interface DocumentRagConfig {
   maxOcrOutputCharacters: number;
 }
 
+export type WebResearchMode = "trafilatura" | "readable" | "defuddle" | "raw";
+
 export interface WebCaptureConfig {
   enabled: boolean;
   timeoutSeconds: number;
@@ -50,6 +52,10 @@ export interface WebCaptureConfig {
   maxAssetCount: number;
   maxAssetBytes: number;
   maxTotalAssetBytes: number;
+  fetchCommand: string;
+  fetchMode: WebResearchMode;
+  fetchTimeoutSeconds: number;
+  maxFetchOutputBytes: number;
   userAgent: string;
 }
 
@@ -138,6 +144,8 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     includeGeneralKnowledge: booleanValue(answer.include_general_knowledge, "rag_answer.include_general_knowledge", true),
   };
   const web = objectValue(file.web_capture, "web_capture");
+  const installedWebResearch = join(homedir(), ".pi", "agent", "skills", "web-research", "web-research");
+  const defaultFetchCommand = await Bun.file(installedWebResearch).exists() ? installedWebResearch : "web-research";
   const webCapture: WebCaptureConfig = {
     enabled: booleanValue(web.enabled, "web_capture.enabled", true),
     timeoutSeconds: numberValue(web.timeout_seconds, "web_capture.timeout_seconds", 30),
@@ -147,12 +155,16 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     maxAssetCount: numberValue(web.max_asset_count, "web_capture.max_asset_count", 50),
     maxAssetBytes: numberValue(web.max_asset_bytes, "web_capture.max_asset_bytes", 10 * 1024 * 1024),
     maxTotalAssetBytes: numberValue(web.max_total_asset_bytes, "web_capture.max_total_asset_bytes", 50 * 1024 * 1024),
-    userAgent: stringValue(web.user_agent, "web_capture.user_agent", "nwp/0.19 (+local knowledge capture)"),
+    fetchCommand: stringValue(web.fetch_command, "web_capture.fetch_command", defaultFetchCommand, true),
+    fetchMode: webResearchMode(web.fetch_mode),
+    fetchTimeoutSeconds: numberValue(web.fetch_timeout_seconds, "web_capture.fetch_timeout_seconds", 180),
+    maxFetchOutputBytes: numberValue(web.max_fetch_output_bytes, "web_capture.max_fetch_output_bytes", 20 * 1024 * 1024),
+    userAgent: stringValue(web.user_agent, "web_capture.user_agent", "nwp/0.20 (+local knowledge capture)"),
   };
   const researchInput = objectValue(file.research, "research");
   const research: ResearchConfig = {
     enabled: booleanValue(researchInput.enabled, "research.enabled", true),
-    searchCommand: stringValue(researchInput.search_command, "research.search_command", "", true),
+    searchCommand: stringValue(researchInput.search_command, "research.search_command", webCapture.fetchCommand, true),
     searchTimeoutSeconds: numberValue(researchInput.search_timeout_seconds, "research.search_timeout_seconds", 60),
     maxSearchOutputBytes: numberValue(researchInput.max_search_output_bytes, "research.max_search_output_bytes", 2 * 1024 * 1024),
     defaultMaxSources: numberValue(researchInput.default_max_sources, "research.default_max_sources", 5),
@@ -184,13 +196,14 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
   }
   if (ragAnswer.maxPromptCharacters < ragAnswer.maxEvidenceCharacters) throw new Error("rag_answer.max_prompt_characters must not be smaller than max_evidence_characters");
 
-  for (const [name, value] of Object.entries({ timeout_seconds: webCapture.timeoutSeconds, max_redirects: webCapture.maxRedirects, max_response_bytes: webCapture.maxResponseBytes, max_extracted_characters: webCapture.maxExtractedCharacters, max_asset_count: webCapture.maxAssetCount, max_asset_bytes: webCapture.maxAssetBytes, max_total_asset_bytes: webCapture.maxTotalAssetBytes })) {
+  for (const [name, value] of Object.entries({ timeout_seconds: webCapture.timeoutSeconds, max_redirects: webCapture.maxRedirects, max_response_bytes: webCapture.maxResponseBytes, max_extracted_characters: webCapture.maxExtractedCharacters, max_asset_count: webCapture.maxAssetCount, max_asset_bytes: webCapture.maxAssetBytes, max_total_asset_bytes: webCapture.maxTotalAssetBytes, fetch_timeout_seconds: webCapture.fetchTimeoutSeconds, max_fetch_output_bytes: webCapture.maxFetchOutputBytes })) {
     if (!Number.isSafeInteger(value) || value < (name === "max_redirects" || name === "max_asset_count" ? 0 : 1)) throw new Error(`web_capture.${name} must be ${name === "max_redirects" || name === "max_asset_count" ? "a non-negative" : "a positive"} integer`);
   }
   if (webCapture.maxRedirects > 20) throw new Error("web_capture.max_redirects must not exceed 20");
   if (webCapture.maxAssetCount > 500) throw new Error("web_capture.max_asset_count must not exceed 500");
   if (webCapture.maxTotalAssetBytes < webCapture.maxAssetBytes) throw new Error("web_capture.max_total_asset_bytes must not be smaller than max_asset_bytes");
   if (webCapture.userAgent.length > 256 || /[\r\n]/.test(webCapture.userAgent)) throw new Error("web_capture.user_agent must be a single line of at most 256 characters");
+  if (webCapture.fetchCommand && (webCapture.fetchCommand.length > 4096 || /[\r\n]/.test(webCapture.fetchCommand))) throw new Error("web_capture.fetch_command must be a single executable path");
 
   for (const [name, value] of Object.entries({ search_timeout_seconds: research.searchTimeoutSeconds, max_search_output_bytes: research.maxSearchOutputBytes, default_max_sources: research.defaultMaxSources, maximum_sources: research.maximumSources })) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error(`research.${name} must be a positive integer`);
@@ -225,6 +238,12 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     webCapture,
     research,
   };
+}
+
+function webResearchMode(value: unknown): WebResearchMode {
+  if (value === undefined) return "trafilatura";
+  if (value === "trafilatura" || value === "readable" || value === "defuddle" || value === "raw") return value;
+  throw new Error("web_capture.fetch_mode must be trafilatura, readable, defuddle, or raw");
 }
 
 function stringValue(value: unknown, name: string, fallback: string, allowEmpty = false): string {

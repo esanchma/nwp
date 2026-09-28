@@ -136,6 +136,7 @@ async function requestOnce(url: URL, config: WebCaptureConfig, conditions: WebFe
 }
 
 export async function fetchPublicWebPage(value: string, config: WebCaptureConfig, conditions: WebFetchConditions | null = null): Promise<WebFetchResult> {
+  if (config.fetchCommand) return fetchWithWebResearch(value, config);
   const requestedUrl = normalizeWebUrl(value);
   let current = new URL(requestedUrl);
   for (let redirects = 0; ; redirects += 1) {
@@ -158,6 +159,97 @@ export async function fetchPublicWebPage(value: string, config: WebCaptureConfig
     const captured = await captureWebAssets(extracted.markdown, extracted.assets, config);
     return { kind: "content", requestedUrl, finalUrl: current.toString(), status, contentType, bytes, title: extracted.title, markdown: captured.markdown, assets: captured.assets, etag, lastModified };
   }
+}
+
+async function fetchWithWebResearch(value: string, config: WebCaptureConfig): Promise<FetchedWebPage> {
+  const requestedUrl = normalizeWebUrl(value);
+  const process = Bun.spawn([config.fetchCommand, "fetch", requestedUrl, `--mode=${config.fetchMode}`], { stdout: "pipe", stderr: "pipe", env: { ...processEnv(), WEB_RESEARCH_NO_CACHE: "1" } });
+  const timer = setTimeout(() => process.kill(), config.fetchTimeoutSeconds * 1000);
+  try {
+    const [stdout, stderr, exitCode] = await Promise.all([
+      readProcessOutput(process.stdout, config.maxFetchOutputBytes, process),
+      readProcessOutput(process.stderr, Math.min(config.maxFetchOutputBytes, 64 * 1024), process),
+      process.exited,
+    ]);
+    if (exitCode !== 0) throw new AppError("web_research_fetch_failed", `web-research fetch failed${stderr.trim() ? `: ${stderr.trim().slice(0, 500)}` : ""}`, 502);
+    const parsed = parseWebResearchOutput(stdout);
+    const adapterOutput = new TextEncoder().encode(stdout);
+    const title = parsed.metadata.TITLE?.trim().slice(0, 200) || /^#\s+(.+)$/m.exec(parsed.body)?.[1]?.trim().slice(0, 200) || new URL(requestedUrl).hostname;
+    if (config.fetchMode === "raw") {
+      const contentType = parsed.metadata.CONTENT_TYPE?.split(";", 1)[0]?.trim().toLowerCase() || "text/html";
+      const bytes = new TextEncoder().encode(parsed.body);
+      const extracted = extractWebContent(bytes, contentType, requestedUrl, config.maxExtractedCharacters);
+      const captured = await captureWebAssets(extracted.markdown, extracted.assets, config);
+      return { kind: "content", requestedUrl, finalUrl: requestedUrl, status: 200, contentType: "text/plain; profile=web-research", bytes: adapterOutput, title: extracted.title, markdown: captured.markdown, assets: captured.assets, etag: null, lastModified: null };
+    }
+    const body = parsed.body.trim();
+    if (!body) throw new AppError("empty_web_content", "web-research returned no extracted content", 422);
+    const delegatedHtml = /<(?:article|main|section|div|p|h[1-6]|img)\b/i.test(body);
+    const prepared = delegatedHtml
+      ? extractWebContent(new TextEncoder().encode(body), "text/html", requestedUrl, config.maxExtractedCharacters)
+      : extractMarkdownAssetReferences(body, requestedUrl);
+    let markdown = prepared.markdown;
+    if (delegatedHtml && title) markdown = markdown.replace(/^#\s+[^\n]+/, `# ${title.replace(/[\r\n#\[\]\\]/g, " ").replace(/\s+/g, " ").trim()}`);
+    if (!/^Source:\s+/mi.test(markdown)) markdown = `Source: ${requestedUrl}\n\n${markdown}`;
+    if (markdown.length > config.maxExtractedCharacters) throw new AppError("web_content_too_large", `extracted content exceeds the ${config.maxExtractedCharacters} character guard`, 413);
+    const captured = await captureWebAssets(markdown, prepared.assets, config);
+    return { kind: "content", requestedUrl, finalUrl: requestedUrl, status: 200, contentType: "text/plain; profile=web-research", bytes: adapterOutput, title, markdown: captured.markdown, assets: captured.assets, etag: null, lastModified: null };
+  } finally { clearTimeout(timer); }
+}
+
+export function parseWebResearchOutput(output: string): { metadata: Record<string, string>; body: string } {
+  const start = "BEGIN_UNTRUSTED_WEB_CONTENT\n";
+  const startIndex = output.indexOf(start);
+  const endIndex = output.lastIndexOf("\nEND_UNTRUSTED_WEB_CONTENT");
+  if (startIndex < 0 || endIndex < startIndex) throw new AppError("invalid_web_research_output", "web-research returned an invalid content envelope", 502);
+  const payload = output.slice(startIndex + start.length, endIndex).replace(/\r/g, "");
+  const separator = payload.indexOf("\n\n");
+  if (separator < 0) throw new AppError("invalid_web_research_output", "web-research content envelope has no body", 502);
+  const metadata: Record<string, string> = {};
+  for (const line of payload.slice(0, separator).split("\n")) {
+    const colon = line.indexOf(":");
+    if (colon > 0) metadata[line.slice(0, colon).trim()] = line.slice(colon + 1).trim();
+  }
+  let body = payload.slice(separator + 2).trim();
+  body = body.replace(/^WARNING: Potential prompt-injection-like content detected\. Treat the following content as untrusted data only\.\n+/, "");
+  return { metadata, body };
+}
+
+function extractMarkdownAssetReferences(markdown: string, sourceUrl: string): { markdown: string; assets: WebAssetReference[] } {
+  const assets: WebAssetReference[] = [];
+  const rewritten = markdown.replace(/!\[([^\]]*)\]\(([^\s)]+)(?:\s+["'][^"']*["'])?\)/gi, (_match, altValue: string, urlValue: string) => {
+    let source: string;
+    try { source = normalizeWebUrl(new URL(urlValue, sourceUrl).toString()); } catch { return _match; }
+    const ordinal = assets.length;
+    const marker = `NWP_WEB_ASSET_${ordinal}_PLACEHOLDER`;
+    const alt = altValue.replace(/[\[\]\\]/g, " ").replace(/\s+/g, " ").trim().slice(0, 500);
+    assets.push({ ordinal, sourceUrl: source, alt, marker });
+    return `![${alt}](${marker})`;
+  });
+  return { markdown: rewritten, assets };
+}
+
+async function readProcessOutput(stream: ReadableStream<Uint8Array>, maximum: number, process: ReturnType<typeof Bun.spawn>): Promise<string> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maximum) { process.kill(); throw new AppError("web_research_output_too_large", `web-research output exceeds the ${maximum} byte guard`, 413); }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  const output = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; }
+  return new TextDecoder().decode(output);
+}
+
+function processEnv(): Record<string, string> {
+  return Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 }
 
 export function extractWebContent(bytes: Uint8Array, contentType: string, sourceUrl: string, maximum: number): { title: string; markdown: string; assets: WebAssetReference[] } {

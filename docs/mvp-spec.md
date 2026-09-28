@@ -255,6 +255,8 @@ Version 0.18 adds richer server-rendered navigation. The Explore dashboard surfa
 
 Version 0.19 preserves raster images from public web pages in their extracted document order. The worker downloads each image through the SSRF-resistant transport, validates its file signature, applies count and byte limits, stores it once by SHA-256, and associates it with an immutable capture snapshot. The document viewer permits only local content-addressed image URLs. Recapture creates a version when the HTML or any captured image changes. Complete backups include every referenced resource, while per-capture exports contain `article.md` and a relative `resources/` directory without remote or data URLs.
 
+Version 0.20 optionally delegates page retrieval and extraction to a trusted `web-research` executable. Configuration selects `trafilatura`, `readable`, `defuddle`, or `raw`; non-raw requests inherit specialized YouTube transcript and X-thread paths. The same executable supplies research discovery through `search` unless a separate command is configured. nwp invokes it without a shell, bounds runtime and output, parses its untrusted-content envelope, and retains deterministic storage, document processing, local image capture, and citation handling. This is an explicit trust-boundary change: delegated page transport follows `web-research` policy, while native nwp capture and every image download retain nwp's SSRF-resistant client.
+
 ## Roadmap
 
 The following decisions describe the remaining product vision and do not expand the original MVP scope. The prioritized user-experience work was completed in versions 0.17 and 0.18; work now proceeds through portability and then operations.
