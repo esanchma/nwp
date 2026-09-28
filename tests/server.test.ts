@@ -62,7 +62,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.18.0" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.18.1" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });
@@ -274,9 +274,27 @@ describe("HTTP API", () => {
     expect([...prefix]).toEqual([0x1f, 0x8b]);
   });
 
-  test("rejects cross-origin and invalid hosts", async () => {
+  test("accepts privacy-reduced same-origin forms and rejects cross-origin requests", async () => {
     expect((await handler(api("/api/v1/pages", { headers: { Origin: "https://evil.example" } }))).status).toBe(403);
+    expect((await handler(api("/api/v1/pages", { headers: { Origin: "null", "Sec-Fetch-Site": "cross-site" } }))).status).toBe(403);
     expect((await handler(new Request("http://evil.example/api/v1/pages", { headers: { Authorization: `Bearer ${token}` } }))).status).toBe(400);
+
+    const form = await handler(request("/new"));
+    expect(form.headers.get("referrer-policy")).toBe("same-origin");
+    const cookie = form.headers.get("set-cookie") ?? "";
+    const csrf = /nwp_csrf=([^;]+)/.exec(cookie)![1]!;
+    const capture = await handler(request("/web-captures", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: `nwp_csrf=${csrf}`,
+        Origin: "null",
+        "Sec-Fetch-Site": "same-origin",
+      },
+      body: new URLSearchParams({ csrf, url: "https://example.com/article" }),
+    }));
+    expect(capture.status).toBe(303);
+    expect(capture.headers.get("location")).toBe("/wiki/web-capture-example-com-article");
   });
 
   test("serves independent stateless MCP requests", async () => {

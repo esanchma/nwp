@@ -923,7 +923,8 @@ function requireBearer(request: Request, token: string): void {
 
 function rejectCrossOrigin(request: Request, url: URL): void {
   const origin = request.headers.get("origin");
-  if (origin && origin !== url.origin) throw new AppError("cross_origin_denied", "cross-origin requests are not allowed", 403);
+  const privacyReducedSameOrigin = origin === "null" && request.headers.get("sec-fetch-site") === "same-origin";
+  if (origin && origin !== url.origin && !privacyReducedSameOrigin) throw new AppError("cross_origin_denied", "cross-origin requests are not allowed", 403);
 }
 
 function apiSource(request: Request): ChangeSource {
@@ -954,7 +955,7 @@ function swaggerUiResponse(): Response {
       "Content-Type": "text/html; charset=utf-8",
       "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
       "X-Content-Type-Options": "nosniff",
-      "Referrer-Policy": "no-referrer",
+      "Referrer-Policy": "same-origin",
     },
   });
 }
@@ -1143,7 +1144,7 @@ function json(value: unknown, status = 200): Response {
 function html(value: string, status = 200, headers = new Headers()): Response {
   headers.set("Content-Type", "text/html; charset=utf-8");
   headers.set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
-  headers.set("Referrer-Policy", "no-referrer");
+  headers.set("Referrer-Policy", "same-origin");
   headers.set("X-Content-Type-Options", "nosniff");
   return new Response(value, { status, headers });
 }
