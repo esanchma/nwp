@@ -47,6 +47,14 @@ describe("Markdown", () => {
     expect(html).not.toContain("onclick");
   });
 
+  test("renders only content-addressed local web images", () => {
+    const hash = "a".repeat(64);
+    const local = renderMarkdown(`![Chart](/web-assets/${hash}/chart.png)`, () => false);
+    expect(local).toContain(`<img src="/web-assets/${hash}/chart.png" alt="Chart" loading="lazy"`);
+    expect(renderMarkdown("![Remote](https://example.com/tracker.png)", () => false)).not.toContain("<img");
+    expect(renderMarkdown("![Inline](data:image/png;base64,AAAA)", () => false)).not.toContain("<img");
+  });
+
   test("does not expand wiki-links inside code", () => {
     const html = renderMarkdown("`[[home]]`", () => true);
     expect(html).toContain("<code>[[home]]</code>");

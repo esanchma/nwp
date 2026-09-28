@@ -36,11 +36,13 @@ describe("secure web capture", () => {
   });
 
   test("extracts bounded text while dropping active and navigational HTML", () => {
-    const html = `<html><head><title>Policy &amp; Guide</title><style>.x{}</style></head><body><nav>Ignore menu</nav><main><h1>Leave</h1><p>Employees receive 16 weeks.</p><script>ignore()</script><ul><li>Paid</li></ul></main></body></html>`;
+    const html = `<html><head><title>Policy &amp; Guide</title><style>.x{}</style></head><body><nav>Ignore menu</nav><main><h1>Leave</h1><p>Employees receive 16 weeks.</p><figure><img data-src="/charts/leave.png" alt="Leave chart"><figcaption>Weeks by region</figcaption></figure><script>ignore()</script><ul><li>Paid</li></ul></main></body></html>`;
     const result = extractWebContent(new TextEncoder().encode(html), "text/html", "https://example.com/policy", 10_000);
     expect(result.title).toBe("Policy & Guide");
     expect(result.markdown).toContain("Employees receive 16 weeks.");
     expect(result.markdown).toContain("Source: https://example.com/policy");
+    expect(result.assets).toEqual([{ ordinal: 0, sourceUrl: "https://example.com/charts/leave.png", alt: "Leave chart", marker: "NWP_WEB_ASSET_0_PLACEHOLDER" }]);
+    expect(result.markdown.indexOf("NWP_WEB_ASSET_0_PLACEHOLDER")).toBeLessThan(result.markdown.indexOf("Weeks by region"));
     expect(result.markdown).not.toContain("Ignore menu");
     expect(result.markdown).not.toContain("ignore()");
     expect(() => extractWebContent(new TextEncoder().encode(html), "text/html", "https://example.com", 10)).toThrow();
@@ -52,27 +54,32 @@ describe("secure web capture", () => {
     expect(store.getById(capture.pageId).tags).toContain("source:web");
     const task = store.claimWebCaptureTask("test-owner")!;
     const html = new TextEncoder().encode("<title>Leave policy</title><p>Employees receive sixteen weeks of paid leave.</p>");
-    store.completeWebCaptureTask(task, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: html, title: "Leave policy", etag: null, lastModified: null, markdown: "# Leave policy\n\nSource: https://example.com/policy\n\nEmployees receive sixteen weeks of paid leave." }, documentConfig.maxFileBytes);
+    const image = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1]);
+    const imageHash = new Bun.CryptoHasher("sha256").update(image).digest("hex") as string;
+    const imageUrl = `/web-assets/${imageHash}/leave.png`;
+    store.completeWebCaptureTask(task, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: html, title: "Leave policy", assets: [{ ordinal: 0, sourceUrl: "https://example.com/leave.png", finalUrl: "https://example.com/leave.png", filename: "leave.png", mimeType: "image/png", bytes: image, sha256: imageHash, alt: "Leave chart" }], etag: null, lastModified: null, markdown: `# Leave policy\n\nSource: https://example.com/policy\n\nEmployees receive sixteen weeks of paid leave.\n\n![Leave chart](${imageUrl})` }, documentConfig.maxFileBytes);
     const completed = store.getWebCapture(capture.id);
     expect(completed).toMatchObject({ status: "ready", title: "Leave policy", httpStatus: 200 });
     expect(completed.documentId).toBeNumber();
-    expect(store.listWebCaptureSnapshots(capture.id)).toHaveLength(1);
+    const snapshot = store.listWebCaptureSnapshots(capture.id)[0]!;
+    expect(store.listWebCaptureAssets(snapshot.id)).toEqual([expect.objectContaining({ ordinal: 0, blobSha256: imageHash, filename: "leave.png", alt: "Leave chart" })]);
+    expect(new Uint8Array(await Bun.file(store.attachmentFilePath(imageHash)).arrayBuffer())).toEqual(image);
     expect(store.getDocument(completed.documentId!).status).toBe("queued");
     expect(await new DocumentWorker(store, documentConfig).runUntilIdle()).toBe(1);
-    expect(store.documentSections(completed.documentId!)[0]!.text).toContain("Leave policy");
+    expect(store.documentSections(completed.documentId!)[0]!.text).toContain(imageUrl);
   });
 
   test("refreshes conditionally, retains changed versions, and schedules due work", async () => {
     const capture = store.createWebCapture("https://example.com/versioned", "rest");
     const first = store.claimWebCaptureTask("owner-1")!;
-    store.completeWebCaptureTask(first, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: new TextEncoder().encode("<p>version one</p>"), title: "Versioned", markdown: "# Versioned\n\nversion one", etag: '"v1"', lastModified: "Wed, 01 Jan 2025 00:00:00 GMT" }, documentConfig.maxFileBytes);
+    store.completeWebCaptureTask(first, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: new TextEncoder().encode("<p>version one</p>"), title: "Versioned", markdown: "# Versioned\n\nversion one", assets: [], etag: '"v1"', lastModified: "Wed, 01 Jan 2025 00:00:00 GMT" }, documentConfig.maxFileBytes);
     const documentId = store.getWebCapture(capture.id).documentId!;
     await new DocumentWorker(store, documentConfig).runUntilIdle();
 
     store.refreshWebCapture(capture.id);
     const second = store.claimWebCaptureTask("owner-2")!;
     expect(second).toMatchObject({ etag: '"v1"', lastModified: "Wed, 01 Jan 2025 00:00:00 GMT" });
-    store.completeWebCaptureTask(second, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: new TextEncoder().encode("<p>version two</p>"), title: "Versioned", markdown: "# Versioned\n\nversion two", etag: '"v2"', lastModified: "Thu, 02 Jan 2025 00:00:00 GMT" }, documentConfig.maxFileBytes);
+    store.completeWebCaptureTask(second, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: new TextEncoder().encode("<p>version two</p>"), title: "Versioned", markdown: "# Versioned\n\nversion two", assets: [], etag: '"v2"', lastModified: "Thu, 02 Jan 2025 00:00:00 GMT" }, documentConfig.maxFileBytes);
     expect(store.listDocumentVersions(documentId)).toHaveLength(2);
     expect(store.listWebCaptureSnapshots(capture.id)).toHaveLength(2);
     await new DocumentWorker(store, documentConfig).runUntilIdle();
@@ -90,6 +97,28 @@ describe("secure web capture", () => {
     expect(store.scheduleWebCapture(capture.id, null).refreshIntervalSeconds).toBeNull();
   });
 
+  test("creates a new immutable version when an interleaved image changes", () => {
+    const capture = store.createWebCapture("https://example.com/illustrated", "rest");
+    const html = new TextEncoder().encode("<p>stable article</p><img src='chart.png'>");
+    const firstImage = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1]);
+    const secondImage = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 2]);
+    const finish = (owner: string, image: Uint8Array) => {
+      const task = store.claimWebCaptureTask(owner)!;
+      const sha256 = new Bun.CryptoHasher("sha256").update(image).digest("hex") as string;
+      store.completeWebCaptureTask(task, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: html, title: "Illustrated", markdown: `# Illustrated\n\n![Chart](/web-assets/${sha256}/chart.png)`, assets: [{ ordinal: 0, sourceUrl: "https://example.com/chart.png", finalUrl: "https://example.com/chart.png", filename: "chart.png", mimeType: "image/png", bytes: image, sha256, alt: "Chart" }], etag: null, lastModified: null }, documentConfig.maxFileBytes);
+      return sha256;
+    };
+    const firstHash = finish("asset-owner-1", firstImage);
+    const documentId = store.getWebCapture(capture.id).documentId!;
+    store.refreshWebCapture(capture.id);
+    const secondHash = finish("asset-owner-2", secondImage);
+
+    expect(firstHash).not.toBe(secondHash);
+    expect(store.listWebCaptureSnapshots(capture.id)).toHaveLength(2);
+    expect(store.listDocumentVersions(documentId)).toHaveLength(2);
+    expect(store.latestWebCaptureAssets(capture.id)[0]?.blobSha256).toBe(secondHash);
+  });
+
   test("supports cancellation, safe stale completion, and retry", () => {
     const capture = store.createWebCapture("https://example.com/failure", "rest");
     const task = store.claimWebCaptureTask("test-owner")!;
@@ -98,7 +127,7 @@ describe("secure web capture", () => {
     expect(store.retryWebCapture(capture.id).status).toBe("queued");
     const stale = store.claimWebCaptureTask("test-owner-2")!;
     expect(store.cancelWebCapture(capture.id).status).toBe("cancelled");
-    store.completeWebCaptureTask(stale, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/plain", bytes: new TextEncoder().encode("stale"), title: "Stale", etag: null, lastModified: null, markdown: "# Stale" }, documentConfig.maxFileBytes);
+    store.completeWebCaptureTask(stale, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/plain", bytes: new TextEncoder().encode("stale"), title: "Stale", assets: [], etag: null, lastModified: null, markdown: "# Stale" }, documentConfig.maxFileBytes);
     expect(store.getWebCapture(capture.id)).toMatchObject({ status: "cancelled", documentId: null });
   });
 });

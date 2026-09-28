@@ -52,6 +52,7 @@ import {
   type TrashList,
   type TreeEntry,
   type WebCapture,
+  type WebCaptureAsset,
   type WebCaptureSnapshot,
   type WebCaptureStatus,
 } from "./domain.ts";
@@ -171,6 +172,19 @@ interface WebSnapshotRow {
   last_modified: string | null;
   size: number;
   fetched_at: string;
+}
+
+interface WebAssetRow {
+  id: number;
+  snapshot_id: number;
+  ordinal: number;
+  blob_sha256: string;
+  source_url: string;
+  final_url: string;
+  filename: string;
+  mime_type: string;
+  alt_text: string;
+  size: number;
 }
 
 interface ResearchRow {
@@ -626,6 +640,23 @@ const migrations = [
       lease_until TEXT,
       last_error TEXT
     );
+  `,
+  `
+    CREATE TABLE web_capture_assets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      snapshot_id INTEGER NOT NULL REFERENCES web_capture_snapshots(id) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL,
+      blob_sha256 TEXT NOT NULL REFERENCES attachment_blobs(sha256),
+      source_url TEXT NOT NULL,
+      final_url TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      alt_text TEXT NOT NULL DEFAULT '',
+      size INTEGER NOT NULL,
+      UNIQUE(snapshot_id, ordinal)
+    );
+    CREATE INDEX web_capture_assets_snapshot_idx ON web_capture_assets(snapshot_id, ordinal);
+    CREATE INDEX web_capture_assets_blob_idx ON web_capture_assets(blob_sha256);
   `,
 ];
 
@@ -1193,6 +1224,10 @@ export class PageStore {
     return this.db.query<WebSnapshotRow, []>("SELECT * FROM web_capture_snapshots ORDER BY web_capture_id, id").all().map(hydrateWebSnapshot);
   }
 
+  allWebCaptureAssets(): WebCaptureAsset[] {
+    return this.db.query<WebAssetRow, []>("SELECT * FROM web_capture_assets ORDER BY snapshot_id, ordinal").all().map(hydrateWebAsset);
+  }
+
   allResearch(): Array<ResearchJob & { sources: ResearchSource[] }> {
     return this.db.query<ResearchRow, []>("SELECT * FROM research_jobs ORDER BY id").all().map((row) => ({ ...hydrateResearch(row), sources: this.researchSources(row.id) }));
   }
@@ -1206,6 +1241,7 @@ export class PageStore {
       attachments: count("SELECT count(*) AS count FROM page_attachments"),
       documents: count("SELECT count(*) AS count FROM documents"),
       webCaptures: count("SELECT count(*) AS count FROM web_captures"),
+      webAssets: count("SELECT count(*) AS count FROM web_capture_assets"),
       researchJobs: count("SELECT count(*) AS count FROM research_jobs"),
       pendingDocumentJobs: count("SELECT count(*) AS count FROM document_jobs"),
       pendingWebCaptureJobs: count("SELECT count(*) AS count FROM web_capture_jobs"),
@@ -1302,6 +1338,25 @@ export class PageStore {
     return this.db.query<WebSnapshotRow, [number]>("SELECT * FROM web_capture_snapshots WHERE web_capture_id = ? ORDER BY id DESC").all(id).map(hydrateWebSnapshot);
   }
 
+  listWebCaptureAssets(snapshotId: number): WebCaptureAsset[] {
+    const snapshot = this.db.query<{ id: number }, [number]>("SELECT id FROM web_capture_snapshots WHERE id = ?").get(snapshotId);
+    if (!snapshot) throw new AppError("web_snapshot_not_found", "web capture snapshot not found", 404);
+    return this.db.query<WebAssetRow, [number]>("SELECT * FROM web_capture_assets WHERE snapshot_id = ? ORDER BY ordinal").all(snapshotId).map(hydrateWebAsset);
+  }
+
+  latestWebCaptureAssets(captureId: number): WebCaptureAsset[] {
+    this.getWebCapture(captureId);
+    const snapshot = this.db.query<{ id: number }, [number]>("SELECT id FROM web_capture_snapshots WHERE web_capture_id = ? ORDER BY id DESC LIMIT 1").get(captureId);
+    return snapshot ? this.listWebCaptureAssets(snapshot.id) : [];
+  }
+
+  webAssetPath(sha256: string): { path: string; mimeType: string; size: number } {
+    if (!/^[a-f0-9]{64}$/.test(sha256)) throw new AppError("invalid_web_asset_hash", "web asset hash is invalid", 400);
+    const row = this.db.query<{ mime_type: string; size: number }, [string]>("SELECT wa.mime_type, wa.size FROM web_capture_assets wa JOIN web_capture_snapshots ws ON ws.id = wa.snapshot_id JOIN web_captures wc ON wc.id = ws.web_capture_id JOIN pages p ON p.id = wc.page_id WHERE wa.blob_sha256 = ? AND p.deleted_at IS NULL LIMIT 1").get(sha256);
+    if (!row) throw new AppError("web_asset_not_found", "web asset not found", 404);
+    return { path: this.pathForHash(sha256), mimeType: row.mime_type, size: row.size };
+  }
+
   webCaptureByUrl(url: string): WebCapture | null {
     const row = this.db.query<WebCaptureRow, [string]>("SELECT wc.* FROM web_captures wc JOIN pages p ON p.id = wc.page_id WHERE wc.url = ? AND p.deleted_at IS NULL").get(url);
     return row ? hydrateWebCapture(row) : null;
@@ -1378,8 +1433,10 @@ export class PageStore {
     if (!humanEditedBefore && (pageBefore.title === webCapturePageTitle(task.url) || pageBefore.title === capture.title) && result.title) this.update(task.pageId, { title: result.title }, "web");
     const page = this.getById(task.pageId);
     const rawHash = this.ensureBlob(result.bytes, result.contentType, checkedAt);
-    const previousHash = this.db.query<{ blob_sha256: string }, [number]>("SELECT blob_sha256 FROM web_capture_snapshots WHERE web_capture_id = ? ORDER BY id DESC LIMIT 1").get(task.webCaptureId)?.blob_sha256;
-    if (previousHash === rawHash) {
+    const previousSnapshot = this.db.query<{ id: number; blob_sha256: string }, [number]>("SELECT id, blob_sha256 FROM web_capture_snapshots WHERE web_capture_id = ? ORDER BY id DESC LIMIT 1").get(task.webCaptureId);
+    const previousAssets = previousSnapshot ? this.db.query<{ ordinal: number; blob_sha256: string; source_url: string; alt_text: string }, [number]>("SELECT ordinal, blob_sha256, source_url, alt_text FROM web_capture_assets WHERE snapshot_id = ? ORDER BY ordinal").all(previousSnapshot.id) : [];
+    const currentAssetIdentity = result.assets.map(({ ordinal, sha256, sourceUrl, alt }) => ({ ordinal, blob_sha256: sha256, source_url: sourceUrl, alt_text: alt }));
+    if (previousSnapshot?.blob_sha256 === rawHash && JSON.stringify(previousAssets) === JSON.stringify(currentAssetIdentity)) {
       this.db.transaction(() => {
         const current = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM web_capture_jobs WHERE web_capture_id = ?").get(task.webCaptureId);
         if (!current || current.revision !== task.revision || current.lease_owner !== task.owner) return;
@@ -1389,6 +1446,7 @@ export class PageStore {
       return;
     }
     const markdownHash = this.ensureBlob(markdownBytes, "text/markdown", checkedAt);
+    const assetHashes = [...new Set(result.assets.map((asset) => this.ensureBlob(asset.bytes, asset.mimeType, checkedAt)))];
     try {
       const completed = this.db.transaction(() => {
         const current = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM web_capture_jobs WHERE web_capture_id = ?").get(task.webCaptureId);
@@ -1412,7 +1470,9 @@ export class PageStore {
           this.db.run("UPDATE documents SET filename = ?, status = 'queued', needs_ocr = 0, ocr_status = 'not_required', needs_review = ?, managed_title = ?, managed_body = ?, managed_tags_json = ?, managed_properties_json = ?, last_error = NULL, updated_at = ? WHERE id = ?", [filename, humanEditedBefore ? 1 : managed.needs_review, humanEditedBefore ? managed.managed_title : page.title, humanEditedBefore ? managed.managed_body : page.body, humanEditedBefore ? managed.managed_tags_json : JSON.stringify(page.tags), humanEditedBefore ? managed.managed_properties_json : JSON.stringify(page.properties), checkedAt, documentId]);
           this.db.run("INSERT INTO document_jobs(document_id, version_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, ?, 0, 1) ON CONFLICT(document_id) DO UPDATE SET version_id = excluded.version_id, requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = document_jobs.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [documentId, Number(version.lastInsertRowid), checkedAt, checkedAt]);
         }
-        this.db.run("INSERT INTO web_capture_snapshots(web_capture_id, blob_sha256, final_url, http_status, content_type, title, etag, last_modified, size, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [task.webCaptureId, rawHash, result.finalUrl, result.status, result.contentType, result.title, result.etag, result.lastModified, result.bytes.byteLength, checkedAt]);
+        const snapshot = this.db.run("INSERT INTO web_capture_snapshots(web_capture_id, blob_sha256, final_url, http_status, content_type, title, etag, last_modified, size, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [task.webCaptureId, rawHash, result.finalUrl, result.status, result.contentType, result.title, result.etag, result.lastModified, result.bytes.byteLength, checkedAt]);
+        const snapshotId = Number(snapshot.lastInsertRowid);
+        for (const asset of result.assets) this.db.run("INSERT INTO web_capture_assets(snapshot_id, ordinal, blob_sha256, source_url, final_url, filename, mime_type, alt_text, size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [snapshotId, asset.ordinal, asset.sha256, asset.sourceUrl, asset.finalUrl, asset.filename, asset.mimeType, asset.alt, asset.bytes.byteLength]);
         this.db.run("UPDATE web_captures SET document_id = ?, final_url = ?, status = 'ready', title = ?, content_type = ?, http_status = ?, etag = ?, last_modified = ?, last_error = NULL, fetched_at = ?, last_checked_at = ?, next_refresh_at = ?, updated_at = ? WHERE id = ?", [documentId, result.finalUrl, result.title, result.contentType, result.status, result.etag, result.lastModified, checkedAt, checkedAt, nextRefresh, checkedAt, task.webCaptureId]);
         this.db.run("DELETE FROM web_capture_jobs WHERE web_capture_id = ? AND revision = ?", [task.webCaptureId, task.revision]);
         return true;
@@ -1420,10 +1480,12 @@ export class PageStore {
       if (!completed) {
         if (this.removeBlobIfOrphaned(rawHash)) this.unlinkBlob(rawHash);
         if (markdownHash !== rawHash && this.removeBlobIfOrphaned(markdownHash)) this.unlinkBlob(markdownHash);
+        for (const hash of assetHashes) if (hash !== rawHash && hash !== markdownHash && this.removeBlobIfOrphaned(hash)) this.unlinkBlob(hash);
       }
     } catch (error) {
       if (this.removeBlobIfOrphaned(rawHash)) this.unlinkBlob(rawHash);
       if (markdownHash !== rawHash && this.removeBlobIfOrphaned(markdownHash)) this.unlinkBlob(markdownHash);
+      for (const hash of assetHashes) if (hash !== rawHash && hash !== markdownHash && this.removeBlobIfOrphaned(hash)) this.unlinkBlob(hash);
       throw error;
     }
   }
@@ -1917,9 +1979,9 @@ export class PageStore {
 
   purgeDeleted(pageId: number): void {
     this.getDeletedById(pageId);
-    const hashes = this.db.query<{ sha256: string }, [number, number, number]>(
-      "SELECT blob_sha256 AS sha256 FROM page_attachments WHERE page_id = ? UNION SELECT dv.blob_sha256 AS sha256 FROM document_versions dv JOIN documents d ON d.id = dv.document_id WHERE d.page_id = ? UNION SELECT ws.blob_sha256 AS sha256 FROM web_capture_snapshots ws JOIN web_captures wc ON wc.id = ws.web_capture_id WHERE wc.page_id = ?",
-    ).all(pageId, pageId, pageId).map(({ sha256 }) => sha256);
+    const hashes = this.db.query<{ sha256: string }, [number, number, number, number]>(
+      "SELECT blob_sha256 AS sha256 FROM page_attachments WHERE page_id = ? UNION SELECT dv.blob_sha256 AS sha256 FROM document_versions dv JOIN documents d ON d.id = dv.document_id WHERE d.page_id = ? UNION SELECT ws.blob_sha256 AS sha256 FROM web_capture_snapshots ws JOIN web_captures wc ON wc.id = ws.web_capture_id WHERE wc.page_id = ? UNION SELECT wa.blob_sha256 AS sha256 FROM web_capture_assets wa JOIN web_capture_snapshots ws ON ws.id = wa.snapshot_id JOIN web_captures wc ON wc.id = ws.web_capture_id WHERE wc.page_id = ?",
+    ).all(pageId, pageId, pageId, pageId).map(({ sha256 }) => sha256);
     const purge = this.db.transaction(() => {
       this.db.run("DELETE FROM document_section_search WHERE document_id IN (SELECT id FROM documents WHERE page_id = ?)", [pageId]);
       this.db.run("DELETE FROM pages WHERE id = ?", [pageId]);
@@ -2100,7 +2162,7 @@ export class PageStore {
   }
 
   private removeBlobIfOrphaned(sha256: string): boolean {
-    const referenced = this.db.query<{ found: number }, [string, string, string]>("SELECT 1 AS found FROM page_attachments WHERE blob_sha256 = ? UNION ALL SELECT 1 AS found FROM document_versions WHERE blob_sha256 = ? UNION ALL SELECT 1 AS found FROM web_capture_snapshots WHERE blob_sha256 = ? LIMIT 1").get(sha256, sha256, sha256);
+    const referenced = this.db.query<{ found: number }, [string, string, string, string]>("SELECT 1 AS found FROM page_attachments WHERE blob_sha256 = ? UNION ALL SELECT 1 AS found FROM document_versions WHERE blob_sha256 = ? UNION ALL SELECT 1 AS found FROM web_capture_snapshots WHERE blob_sha256 = ? UNION ALL SELECT 1 AS found FROM web_capture_assets WHERE blob_sha256 = ? LIMIT 1").get(sha256, sha256, sha256, sha256);
     if (referenced) return false;
     this.db.run("DELETE FROM attachment_blobs WHERE sha256 = ?", [sha256]);
     return true;
@@ -2140,6 +2202,10 @@ function hydrateResearch(row: ResearchRow): ResearchJob {
 
 function hydrateWebSnapshot(row: WebSnapshotRow): WebCaptureSnapshot {
   return { id: row.id, webCaptureId: row.web_capture_id, blobSha256: row.blob_sha256, finalUrl: row.final_url, httpStatus: row.http_status, contentType: row.content_type, title: row.title, etag: row.etag, lastModified: row.last_modified, size: row.size, fetchedAt: row.fetched_at };
+}
+
+function hydrateWebAsset(row: WebAssetRow): WebCaptureAsset {
+  return { id: row.id, snapshotId: row.snapshot_id, ordinal: row.ordinal, blobSha256: row.blob_sha256, sourceUrl: row.source_url, finalUrl: row.final_url, filename: row.filename, mimeType: row.mime_type, alt: row.alt_text, size: row.size };
 }
 
 function hydrateWebCapture(row: WebCaptureRow): WebCapture {

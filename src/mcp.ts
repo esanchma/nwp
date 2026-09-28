@@ -26,7 +26,7 @@ export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSear
 
 function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig, answerConfig?: RagAnswerConfig, webConfig?: WebCaptureConfig, researchConfig?: ResearchConfig): McpServer {
   const embedder = semanticConfig?.enabled ? new OllamaEmbedder(semanticConfig) : null;
-  const server = new McpServer({ name: "nwp", version: "0.18.1" });
+  const server = new McpServer({ name: "nwp", version: "0.19.0" });
   const statusSchema = z.enum(["draft", "published", "archived"]);
   const statusFilterSchema = z.enum(["draft", "published", "archived", "all"]);
   const propertiesSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]));
@@ -185,8 +185,17 @@ function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, d
 
   server.registerTool(
     "get_web_capture",
-    { description: "Get one web capture and its retained raw snapshot metadata", inputSchema: { capture_id: z.number().int().positive() }, annotations: { readOnlyHint: true } },
-    async ({ capture_id }) => toolResult({ capture: store.getWebCapture(capture_id), snapshots: store.listWebCaptureSnapshots(capture_id) }),
+    { description: "Get one web capture with retained raw snapshot and current local image metadata", inputSchema: { capture_id: z.number().int().positive() }, annotations: { readOnlyHint: true } },
+    async ({ capture_id }) => toolResult({ capture: store.getWebCapture(capture_id), snapshots: store.listWebCaptureSnapshots(capture_id), assets: store.latestWebCaptureAssets(capture_id) }),
+  );
+
+  server.registerTool(
+    "get_web_capture_export",
+    { description: "Get the authenticated REST URL for a tar.gz containing extracted article.md and its resources folder", inputSchema: { capture_id: z.number().int().positive() }, annotations: { readOnlyHint: true } },
+    async ({ capture_id }) => {
+      store.getWebCapture(capture_id);
+      return toolResult({ method: "GET", url: `/api/v1/web-captures/${capture_id}/export`, authentication: "Bearer token", contentType: "application/gzip" });
+    },
   );
 
   server.registerTool(

@@ -27,7 +27,7 @@ beforeEach(async () => {
     attachmentMaxBytes: null,
     semanticSearch: { enabled: false, ollamaUrl: "http://127.0.0.1:11434", embeddingModel: "bge-m3", embeddingDimensions: 1024, queryPrefix: "", chunkCharacters: 1600, chunkOverlap: 200 },
     ragAnswer: { enabled: false, ollamaUrl: "http://127.0.0.1:11434", generationModel: "qwen3:8b", timeoutSeconds: 120, maxEvidenceItems: 8, maxEvidenceCharacters: 6000, maxPromptCharacters: 50_000, maxAnswerCharacters: 12_000, includeGeneralKnowledge: true },
-    webCapture: { enabled: true, timeoutSeconds: 30, maxRedirects: 5, maxResponseBytes: 20_000_000, maxExtractedCharacters: 2_000_000, userAgent: "nwp-test" },
+    webCapture: { enabled: true, timeoutSeconds: 30, maxRedirects: 5, maxResponseBytes: 20_000_000, maxExtractedCharacters: 2_000_000, maxAssetCount: 50, maxAssetBytes: 10_000_000, maxTotalAssetBytes: 50_000_000, userAgent: "nwp-test" },
     research: { enabled: true, searchCommand: "", searchTimeoutSeconds: 60, maxSearchOutputBytes: 2_000_000, defaultMaxSources: 5, maximumSources: 20 },
     documentRag: { enabled: true, maxFileBytes: 10_000_000, maxExpandedBytes: 50_000_000, maxArchiveEntries: 10_000, maxCompressionRatio: 1000, maxPdfPages: 10_000, maxSpreadsheetCells: 5_000_000, ocrEnabled: false, tesseractCommand: "tesseract", pdfRendererCommand: "pdftoppm", ocrLanguages: ["spa", "eng"], ocrTimeoutSeconds: 120, maxOcrItems: 10_000, maxOcrOutputCharacters: 1_000_000 },
   };
@@ -62,7 +62,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.18.1" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.19.0" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });
@@ -140,7 +140,22 @@ describe("HTTP API", () => {
     expect((await handler(api(`/api/v1/web-captures/${capture.id}/cancel`, { method: "POST" }))).status).toBe(200);
     expect((await handler(api(`/api/v1/web-captures/${capture.id}/retry`, { method: "POST" }))).status).toBe(200);
     const task = store.claimWebCaptureTask("server-test")!;
-    store.completeWebCaptureTask(task, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/plain", bytes: new TextEncoder().encode("captured"), title: "Captured", markdown: "# Captured\n\ncaptured", etag: '"v1"', lastModified: null }, config.documentRag.maxFileBytes);
+    const image = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1]);
+    const imageHash = new Bun.CryptoHasher("sha256").update(image).digest("hex") as string;
+    store.completeWebCaptureTask(task, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/plain", bytes: new TextEncoder().encode("captured"), title: "Captured", markdown: `# Captured\n\ncaptured\n\n![Chart](/web-assets/${imageHash}/chart.png)`, assets: [{ ordinal: 0, sourceUrl: "https://example.com/chart.png", finalUrl: "https://example.com/chart.png", filename: "chart.png", mimeType: "image/png", bytes: image, sha256: imageHash, alt: "Chart" }], etag: '"v1"', lastModified: null }, config.documentRag.maxFileBytes);
+    const assetResponse = await handler(request(`/web-assets/${imageHash}/chart.png`));
+    expect(assetResponse.status).toBe(200);
+    expect(assetResponse.headers.get("cache-control")).toContain("immutable");
+    const readyCapture = store.getWebCapture(capture.id);
+    expect(await new DocumentWorker(store, config.documentRag).runUntilIdle()).toBe(1);
+    const content = await (await handler(request(`/documents/${readyCapture.documentId}/content`))).text();
+    expect(content).toContain(`/web-assets/${imageHash}/chart.png`);
+    const portableExport = await handler(request(`/web-captures/${capture.id}/export`));
+    expect(portableExport.status).toBe(200);
+    expect((await portableExport.arrayBuffer()).byteLength).toBeGreaterThan(0);
+    const apiExport = await handler(api(`/api/v1/web-captures/${capture.id}/export`));
+    expect(apiExport.status).toBe(200);
+    expect((await apiExport.arrayBuffer()).byteLength).toBeGreaterThan(0);
     expect((await handler(api(`/api/v1/web-captures/${capture.id}/refresh`, { method: "POST" }))).status).toBe(200);
     expect((await handler(api(`/api/v1/web-captures/${capture.id}/schedule`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refreshIntervalSeconds: 3600 }) }))).status).toBe(200);
     expect((await handler(api("/api/v1/web-captures"))).status).toBe(200);
@@ -313,7 +328,7 @@ describe("HTTP API", () => {
     }));
     expect(toolsResponse.status).toBe(200);
     const tools = await toolsResponse.json() as { result: { tools: Array<{ name: string }> } };
-    expect(tools.result.tools.map(({ name }) => name).sort()).toEqual(["acknowledge_document_review", "answer_question", "cancel_document_extraction", "cancel_research", "cancel_web_capture", "create_page", "define_tag", "delete_attachment", "delete_page", "document_ocr_status", "export_page", "get_attachment", "get_attachment_upload_instructions", "get_deleted_page", "get_document", "get_document_content", "get_document_upload_instructions", "get_full_export", "get_health", "get_page", "get_page_tree", "get_research", "get_revision_diff", "get_statistics", "get_web_capture", "import_page", "list_attachments", "list_documents", "list_pages", "list_research", "list_revisions", "list_tag_definitions", "list_trash", "list_web_captures", "purge_page", "queue_research", "queue_web_capture", "refresh_web_capture", "restore_page", "restore_revision", "retry_document_extraction", "retry_research", "retry_web_capture", "schedule_web_capture", "search_knowledge", "search_pages", "semantic_index_status", "update_page"]);
+    expect(tools.result.tools.map(({ name }) => name).sort()).toEqual(["acknowledge_document_review", "answer_question", "cancel_document_extraction", "cancel_research", "cancel_web_capture", "create_page", "define_tag", "delete_attachment", "delete_page", "document_ocr_status", "export_page", "get_attachment", "get_attachment_upload_instructions", "get_deleted_page", "get_document", "get_document_content", "get_document_upload_instructions", "get_full_export", "get_health", "get_page", "get_page_tree", "get_research", "get_revision_diff", "get_statistics", "get_web_capture", "get_web_capture_export", "import_page", "list_attachments", "list_documents", "list_pages", "list_research", "list_revisions", "list_tag_definitions", "list_trash", "list_web_captures", "purge_page", "queue_research", "queue_web_capture", "refresh_web_capture", "restore_page", "restore_revision", "retry_document_extraction", "retry_research", "retry_web_capture", "schedule_web_capture", "search_knowledge", "search_pages", "semantic_index_status", "update_page"]);
 
     const healthResponse = await handler(request("/mcp", {
       method: "POST",

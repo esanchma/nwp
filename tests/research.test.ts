@@ -46,7 +46,7 @@ describe("durable research", () => {
     for (let index = 0; index < 2; index += 1) {
       const task = store.claimWebCaptureTask(`capture-${index}`)!;
       const text = index === 0 ? "The policy grants sixteen weeks of paid leave." : "Requests require manager approval.";
-      store.completeWebCaptureTask(task, { kind: "content", requestedUrl: task.url, finalUrl: task.url, status: 200, contentType: "text/plain", bytes: new TextEncoder().encode(text), title: `Source ${index + 1}`, markdown: `# Source ${index + 1}\n\n${text}`, etag: null, lastModified: null }, documentConfig.maxFileBytes);
+      store.completeWebCaptureTask(task, { kind: "content", requestedUrl: task.url, finalUrl: task.url, status: 200, contentType: "text/plain", bytes: new TextEncoder().encode(text), title: `Source ${index + 1}`, markdown: `# Source ${index + 1}\n\n${text}`, assets: [], etag: null, lastModified: null }, documentConfig.maxFileBytes);
     }
     expect(await new DocumentWorker(store, documentConfig).runUntilIdle()).toBe(2);
     store.db.run("UPDATE research_queue SET available_at = ? WHERE research_id = ?", [new Date(0).toISOString(), job.id]);

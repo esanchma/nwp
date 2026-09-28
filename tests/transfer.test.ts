@@ -5,7 +5,7 @@ import { gunzipSync } from "node:zlib";
 import { join } from "node:path";
 import tar from "tar-stream";
 import { PageStore } from "../src/database.ts";
-import { createFullExport, exportPageMarkdown, importPageMarkdown } from "../src/transfer.ts";
+import { createFullExport, createWebCaptureExport, exportPageMarkdown, importPageMarkdown } from "../src/transfer.ts";
 
 let store: PageStore | null = null;
 let dir = "";
@@ -66,7 +66,10 @@ describe("complete export", () => {
     const document = db.createDocument("source.txt", "text/plain", "text", new TextEncoder().encode("document source"), "web", 1_000_000);
     const capture = db.createWebCapture("https://example.com/article", "web");
     const webTask = db.claimWebCaptureTask("export-test")!;
-    db.completeWebCaptureTask(webTask, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: new TextEncoder().encode("<p>raw web source</p>"), title: "Article", etag: null, lastModified: null, markdown: "# Article\n\nweb source" }, 1_000_000);
+    const image = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+    const imageHash = new Bun.CryptoHasher("sha256").update(image).digest("hex") as string;
+    const imageUrl = `/web-assets/${imageHash}/diagram.png`;
+    db.completeWebCaptureTask(webTask, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: new TextEncoder().encode("<p>raw web source</p>"), title: "Article", assets: [{ ordinal: 0, sourceUrl: "https://example.com/diagram.png", finalUrl: "https://cdn.example.com/diagram.png", filename: "diagram.png", mimeType: "image/png", bytes: image, sha256: imageHash, alt: "Diagram" }], etag: null, lastModified: null, markdown: `# Article\n\nweb source\n\n![Diagram](${imageUrl})` }, 1_000_000);
     const snapshot = db.listWebCaptureSnapshots(capture.id)[0]!;
 
     const archive = createFullExport(db);
@@ -80,6 +83,7 @@ describe("complete export", () => {
     expect(entries.get(`attachments/${attachment.sha256}`)?.toString()).toBe("content");
     expect(entries.get(`documents/${document.currentVersion.sha256}`)?.toString()).toBe("document source");
     expect(entries.get(`web/${snapshot.blobSha256}`)?.toString()).toBe("<p>raw web source</p>");
+    expect(entries.get(`web-assets/${imageHash}`)).toEqual(Buffer.from(image));
     const manifest = JSON.parse(entries.get("manifest.json")!.toString()) as { format: string; version: number; database: { sha256: string }; attachments: unknown[]; documents: unknown[]; webCaptures: unknown[]; research: unknown[] };
     expect(manifest.format).toBe("nwp-export");
     expect(manifest.version).toBe(2);
@@ -88,6 +92,11 @@ describe("complete export", () => {
     expect(manifest.documents).toHaveLength(2);
     expect(manifest.webCaptures).toHaveLength(1);
     expect(manifest.research).toEqual([]);
+
+    const portable = createWebCaptureExport(db, capture.id);
+    const portableEntries = await untar(gunzipSync(Buffer.from(await new Response(portable.stream).arrayBuffer())));
+    expect(portableEntries.get("article.md")?.toString()).toContain(`![Diagram](resources/${imageHash.slice(0, 12)}-diagram.png)`);
+    expect(portableEntries.get(`resources/${imageHash.slice(0, 12)}-diagram.png`)).toEqual(Buffer.from(image));
   });
 });
 

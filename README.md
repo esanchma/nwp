@@ -2,7 +2,7 @@
 
 nwp (nano-wiki-pi) is a small local wiki for people and development agents. It provides a server-rendered web interface, a CLI, and MCP tools over one SQLite database.
 
-nwp supports page creation, reading, listing, editing, hybrid full-text and semantic search, durable document extraction with local OCR, versioned web capture, durable multi-source research, citation-grounded answers, revision history, restoration, a recoverable trash, deduplicated file attachments, publication states, custom properties, parent-child navigation, and portable import/export. Pages use GitHub Flavored Markdown, `[[wiki-links]]`, backlinks, and tags. nwp stores a complete snapshot before each meaningful edit.
+nwp supports page creation, reading, listing, editing, hybrid full-text and semantic search, durable document extraction with local OCR, versioned web capture with local images, durable multi-source research, citation-grounded answers, revision history, restoration, a recoverable trash, deduplicated file attachments, publication states, custom properties, parent-child navigation, and portable import/export. Pages use GitHub Flavored Markdown, `[[wiki-links]]`, backlinks, and tags. nwp stores a complete snapshot before each meaningful edit.
 
 ## Requirements
 
@@ -71,7 +71,10 @@ timeout_seconds = 30
 max_redirects = 5
 max_response_bytes = 20971520
 max_extracted_characters = 2000000
-user_agent = "nwp/0.18 (+local knowledge capture)"
+max_asset_count = 50
+max_asset_bytes = 10485760
+max_total_asset_bytes = 52428800
+user_agent = "nwp/0.19 (+local knowledge capture)"
 
 [research]
 enabled = true
@@ -164,6 +167,7 @@ Page commands connect to the running local server and read the generated token a
 ./dist/nwp web refresh 1
 ./dist/nwp web schedule 1 --interval 86400
 ./dist/nwp web schedule 1 --interval off
+./dist/nwp web export 1 --output article-with-resources.tar.gz
 ./dist/nwp web cancel 1
 ./dist/nwp web retry 1
 ./dist/nwp web run --json
@@ -213,6 +217,7 @@ Available operations:
 - `GET|POST /api/v1/documents`
 - `GET|POST /api/v1/web-captures`
 - `GET /api/v1/web-captures/:id`
+- `GET /api/v1/web-captures/:id/export`
 - `POST /api/v1/web-captures/:id/refresh|cancel|retry`
 - `PUT /api/v1/web-captures/:id/schedule`
 - `GET|POST /api/v1/research`
@@ -292,6 +297,7 @@ Tools:
 - `queue_web_capture`
 - `list_web_captures`
 - `get_web_capture`
+- `get_web_capture_export`
 - `cancel_web_capture`
 - `retry_web_capture`
 - `refresh_web_capture`
@@ -376,9 +382,11 @@ Office archives are parsed without executing macros, formulas, or external conne
 
 ## Web capture
 
-Queue a public page from `/web-captures`, `nwp web add`, REST, or MCP. The durable worker fetches it, retains the exact raw response as a content-addressed snapshot, extracts bounded Markdown, and sends that Markdown through the existing document extraction and semantic indexing pipeline. Each capture receives a linked wiki page with `source:web`, `type:web-capture`, and a `web.url` property. Once both workers finish, captured content participates in document search, cited answers, and complete exports.
+Queue a public page from `/web-captures`, `nwp web add`, REST, or MCP. The durable worker fetches it, retains the exact raw response as a content-addressed snapshot, extracts bounded Markdown, captures supported raster images in document order, and sends the Markdown through the existing document extraction and semantic indexing pipeline. Each capture receives a linked wiki page with `source:web`, `type:web-capture`, and a `web.url` property. Once both workers finish, captured content participates in document search, cited answers, and complete exports.
 
 Network access is deliberately narrow: only HTTP(S) is allowed; URL credentials, localhost, private, loopback, link-local, multicast, documentation, and reserved addresses are blocked. nwp resolves every redirect independently, rejects any hostname with a non-public DNS answer, pins the validated address for the connection, sends no cookies or credentials, accepts only textual content, disables compression, and enforces redirect, timeout, response-byte, and extracted-character guards. Web content remains untrusted evidence and cannot issue model or tool instructions.
+
+Captured images use the same public-network checks as the page request. nwp validates each redirect and DNS answer, pins the selected public address, checks the file signature, and enforces per-image, aggregate-byte, and item-count limits. Images are immutable SHA-256-addressed blobs associated with one snapshot. The content viewer serves only these local resources; it never loads remote images or accepts data URLs. **Export article and resources** produces a `tar.gz` with `article.md` and a relative `resources/` directory.
 
 A failed capture retries with a leased SQLite job up to three times. Cancellation and retry are explicit. Existing captures can be refreshed manually or hourly, daily, weekly, or at another interval of at least five minutes. Refresh requests use retained `ETag` and `Last-Modified` validators. HTTP 304 and byte-identical responses do not create document versions; changed responses retain a new raw snapshot and queue an explicit document version while preserving human page edits.
 

@@ -40,7 +40,7 @@ async function main(argv: string[]): Promise<void> {
   if (command === "worker") return workerCommand(argv.slice(1));
   if (command === "index") return indexCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") return printHelp();
-  if (command === "--version" || command === "-v") return console.log("nwp 0.18.1");
+  if (command === "--version" || command === "-v") return console.log("nwp 0.19.0");
   throw new Error(`unknown command '${command}'. Run 'nwp help'.`);
 }
 
@@ -224,6 +224,12 @@ async function webCommand(argv: string[]): Promise<void> {
   }
   const token = optionalString(options, "token") ?? await readApiToken(config);
   const endpoint = optionalString(options, "endpoint") ?? `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${config.port}`;
+  if (action === "export") {
+    const id = integerArgument(options, 0, "web export requires a capture ID");
+    const destination = resolve(optionalString(options, "output") ?? `web-capture-${id}.tar.gz`);
+    await downloadApi(endpoint, token, `/api/v1/web-captures/${id}/export`, destination);
+    return printResult({ path: destination }, hasFlag(options, "json"));
+  }
   if (action === "list") return printResult(await apiRequest(endpoint, token, "/api/v1/web-captures", "GET"), true);
   if (action === "add") {
     const url = positional(options, 0);
@@ -241,7 +247,7 @@ async function webCommand(argv: string[]): Promise<void> {
     const refreshIntervalSeconds = interval === "off" ? null : Number(interval);
     return printResult(await apiRequest(endpoint, token, `/api/v1/web-captures/${id}/schedule`, "PUT", { refreshIntervalSeconds }), true);
   }
-  throw new Error("web command must be add, list, get, refresh, schedule, cancel, retry, or run");
+  throw new Error("web command must be add, list, get, export, refresh, schedule, cancel, retry, or run");
 }
 
 async function documentCommand(argv: string[]): Promise<void> {
@@ -586,6 +592,15 @@ async function answerCommand(argv: string[]): Promise<void> {
   printResult(await apiRequest(endpoint, token, "/api/v1/answer", "POST", body), hasFlag(options, "json"));
 }
 
+async function downloadApi(endpoint: string, token: string, path: string, destination: string): Promise<void> {
+  const response = await fetch(new URL(path, endpoint), { headers: { Authorization: `Bearer ${token}`, "X-NWP-Source": "cli" } });
+  if (!response.ok) {
+    const value = await response.json() as { error?: { message?: string } };
+    throw new Error(value.error?.message ?? `API returned ${response.status}`);
+  }
+  await writeFile(destination, new Uint8Array(await response.arrayBuffer()), { mode: 0o600 });
+}
+
 async function apiRequest(endpoint: string, token: string, path: string, method: string, body?: unknown): Promise<unknown> {
   const response = await fetch(new URL(path, endpoint), {
     method,
@@ -758,6 +773,7 @@ Usage:
   nwp document run [--json]
   nwp web add URL
   nwp web list|get|refresh|cancel|retry [ID]
+  nwp web export ID [--output PATH]
   nwp web schedule ID --interval SECONDS|off
   nwp web run [--json]
   nwp research add "QUESTION" [--urls URL,URL] [--max-sources N]

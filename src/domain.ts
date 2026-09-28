@@ -302,6 +302,19 @@ export interface WebCaptureSnapshot {
   fetchedAt: string;
 }
 
+export interface WebCaptureAsset {
+  id: number;
+  snapshotId: number;
+  ordinal: number;
+  blobSha256: string;
+  sourceUrl: string;
+  finalUrl: string;
+  filename: string;
+  mimeType: string;
+  alt: string;
+  size: number;
+}
+
 export type ResearchStatus = "queued" | "researching" | "ready" | "failed" | "cancelled";
 
 export interface ResearchJob {

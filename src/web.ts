@@ -3,9 +3,28 @@ import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { BlockList, isIP } from "node:net";
 import { randomUUID } from "node:crypto";
+import { basename, extname } from "node:path";
 import type { WebCaptureConfig } from "./config.ts";
 import type { PageStore, WebCaptureTask } from "./database.ts";
 import { AppError } from "./domain.ts";
+
+export interface FetchedWebAsset {
+  ordinal: number;
+  sourceUrl: string;
+  finalUrl: string;
+  filename: string;
+  mimeType: string;
+  bytes: Uint8Array;
+  sha256: string;
+  alt: string;
+}
+
+export interface WebAssetReference {
+  ordinal: number;
+  sourceUrl: string;
+  alt: string;
+  marker: string;
+}
 
 export interface FetchedWebPage {
   kind: "content";
@@ -16,6 +35,7 @@ export interface FetchedWebPage {
   bytes: Uint8Array;
   title: string;
   markdown: string;
+  assets: FetchedWebAsset[];
   etag: string | null;
   lastModified: string | null;
 }
@@ -89,7 +109,7 @@ function readResponse(response: IncomingMessage, maximum: number): Promise<Uint8
   });
 }
 
-async function requestOnce(url: URL, config: WebCaptureConfig, conditions: WebFetchConditions | null): Promise<{ response: IncomingMessage; bytes: Uint8Array }> {
+async function requestOnce(url: URL, config: WebCaptureConfig, conditions: WebFetchConditions | null, maximum = config.maxResponseBytes, accept = "text/html,application/xhtml+xml,text/plain,text/markdown;q=0.9"): Promise<{ response: IncomingMessage; bytes: Uint8Array }> {
   const hostname = url.hostname.startsWith("[") ? url.hostname.slice(1, -1) : url.hostname;
   const target = await resolvePublicAddress(hostname);
   return new Promise((resolve, reject) => {
@@ -102,10 +122,10 @@ async function requestOnce(url: URL, config: WebCaptureConfig, conditions: WebFe
       path: `${url.pathname}${url.search}`,
       method: "GET",
       servername: url.protocol === "https:" ? hostname : undefined,
-      headers: { Host: url.host, "User-Agent": config.userAgent, Accept: "text/html,application/xhtml+xml,text/plain,text/markdown;q=0.9", "Accept-Encoding": "identity", ...(conditions?.etag ? { "If-None-Match": conditions.etag } : {}), ...(conditions?.lastModified ? { "If-Modified-Since": conditions.lastModified } : {}) },
+      headers: { Host: url.host, "User-Agent": config.userAgent, Accept: accept, "Accept-Encoding": "identity", ...(conditions?.etag ? { "If-None-Match": conditions.etag } : {}), ...(conditions?.lastModified ? { "If-Modified-Since": conditions.lastModified } : {}) },
     }, async (response) => {
       if ([301, 302, 303, 307, 308].includes(response.statusCode ?? 0) && response.headers.location) { clearTimeout(timer); response.resume(); resolve({ response, bytes: new Uint8Array() }); return; }
-      try { resolve({ response, bytes: await readResponse(response, config.maxResponseBytes) }); }
+      try { resolve({ response, bytes: await readResponse(response, maximum) }); }
       catch (error) { reject(error); }
       finally { clearTimeout(timer); }
     });
@@ -135,12 +155,14 @@ export async function fetchPublicWebPage(value: string, config: WebCaptureConfig
     const contentType = String(response.headers["content-type"] ?? "application/octet-stream").split(";", 1)[0]!.trim().toLowerCase();
     if (!["text/html", "application/xhtml+xml", "text/plain", "text/markdown"].includes(contentType)) throw new AppError("unsupported_web_content", `unsupported web content type '${contentType}'`, 415);
     const extracted = extractWebContent(bytes, contentType, current.toString(), config.maxExtractedCharacters);
-    return { kind: "content", requestedUrl, finalUrl: current.toString(), status, contentType, bytes, ...extracted, etag, lastModified };
+    const captured = await captureWebAssets(extracted.markdown, extracted.assets, config);
+    return { kind: "content", requestedUrl, finalUrl: current.toString(), status, contentType, bytes, title: extracted.title, markdown: captured.markdown, assets: captured.assets, etag, lastModified };
   }
 }
 
-export function extractWebContent(bytes: Uint8Array, contentType: string, sourceUrl: string, maximum: number): { title: string; markdown: string } {
+export function extractWebContent(bytes: Uint8Array, contentType: string, sourceUrl: string, maximum: number): { title: string; markdown: string; assets: WebAssetReference[] } {
   const input = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  const assets: WebAssetReference[] = [];
   let title = new URL(sourceUrl).hostname;
   let content = input;
   if (contentType === "text/html" || contentType === "application/xhtml+xml") {
@@ -148,9 +170,10 @@ export function extractWebContent(bytes: Uint8Array, contentType: string, source
     if (titleMatch) title = cleanText(titleMatch[1]!).replace(/\s+/g, " ").trim().slice(0, 200) || title;
     content = input
       .replace(/<(script|style|noscript|svg|canvas|template|form|nav|header|footer|aside)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "\n")
+      .replace(/<img\b[^>]*>/gi, (tag) => imageMarkdown(tag, sourceUrl, assets))
       .replace(/<h1\b[^>]*>/gi, "\n# ").replace(/<h2\b[^>]*>/gi, "\n## ").replace(/<h[3-6]\b[^>]*>/gi, "\n### ")
       .replace(/<li\b[^>]*>/gi, "\n- ")
-      .replace(/<\/?(?:p|div|section|article|main|br|tr|blockquote|pre|table|ul|ol|h[1-6])\b[^>]*>/gi, "\n")
+      .replace(/<\/?(?:p|div|section|article|main|figure|figcaption|br|tr|blockquote|pre|table|ul|ol|h[1-6])\b[^>]*>/gi, "\n")
       .replace(/<[^>]+>/g, " ");
   } else if (contentType === "text/markdown") {
     const heading = /^#\s+(.+)$/m.exec(input);
@@ -162,7 +185,111 @@ export function extractWebContent(bytes: Uint8Array, contentType: string, source
   const prefix = `# ${title}\n\nSource: ${sourceUrl}\n\n`;
   const markdown = `${prefix}${content}`;
   if (markdown.length > maximum) throw new AppError("web_content_too_large", `extracted content exceeds the ${maximum} character guard`, 413);
-  return { title, markdown };
+  return { title, markdown, assets };
+}
+
+function imageMarkdown(tag: string, sourceUrl: string, assets: WebAssetReference[]): string {
+  const source = imageSource(tag);
+  if (!source) return "\n";
+  let resolved: string;
+  try { resolved = normalizeWebUrl(new URL(cleanText(source), sourceUrl).toString()); }
+  catch { return "\n"; }
+  const ordinal = assets.length;
+  const marker = `NWP_WEB_ASSET_${ordinal}_PLACEHOLDER`;
+  const alt = cleanText(attribute(tag, "alt") ?? "").replace(/[\[\]\\]/g, " ").replace(/\s+/g, " ").trim().slice(0, 500);
+  assets.push({ ordinal, sourceUrl: resolved, alt, marker });
+  return `\n\n![${alt}](${marker})\n\n`;
+}
+
+function imageSource(tag: string): string | null {
+  for (const name of ["data-src", "data-lazy-src", "data-original", "src"]) {
+    const value = attribute(tag, name)?.trim();
+    if (value && !value.startsWith("data:") && !value.startsWith("blob:")) return value;
+  }
+  for (const name of ["data-srcset", "srcset"]) {
+    const value = attribute(tag, name);
+    if (!value) continue;
+    const candidates = value.split(",").map((item) => item.trim().split(/\s+/, 1)[0]).filter(Boolean);
+    const selected = candidates.at(-1);
+    if (selected && !selected.startsWith("data:") && !selected.startsWith("blob:")) return selected;
+  }
+  return null;
+}
+
+function attribute(tag: string, name: string): string | null {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`(?:^|\\s)${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i").exec(tag);
+  return match?.[1] ?? match?.[2] ?? match?.[3] ?? null;
+}
+
+async function captureWebAssets(markdownValue: string, references: WebAssetReference[], config: WebCaptureConfig): Promise<{ markdown: string; assets: FetchedWebAsset[] }> {
+  let markdown = markdownValue;
+  const assets: FetchedWebAsset[] = [];
+  const fetched = new Map<string, Omit<FetchedWebAsset, "ordinal" | "alt"> | null>();
+  let totalBytes = 0;
+  for (const reference of references) {
+    if (reference.ordinal >= config.maxAssetCount) {
+      markdown = dropImage(markdown, reference);
+      continue;
+    }
+    let resource = fetched.get(reference.sourceUrl);
+    if (resource === undefined) {
+      try {
+        const result = await fetchPublicImage(reference.sourceUrl, config);
+        if (totalBytes + result.bytes.byteLength > config.maxTotalAssetBytes) resource = null;
+        else {
+          totalBytes += result.bytes.byteLength;
+          resource = result;
+        }
+      } catch { resource = null; }
+      fetched.set(reference.sourceUrl, resource);
+    }
+    if (!resource) {
+      markdown = dropImage(markdown, reference);
+      continue;
+    }
+    const asset = { ...resource, ordinal: reference.ordinal, alt: reference.alt };
+    assets.push(asset);
+    markdown = markdown.replace(`![${reference.alt}](${reference.marker})`, `![${reference.alt}](/web-assets/${asset.sha256}/${encodeURIComponent(asset.filename)})`);
+  }
+  return { markdown, assets };
+}
+
+function dropImage(markdown: string, reference: WebAssetReference): string {
+  return markdown.replace(`![${reference.alt}](${reference.marker})`, reference.alt ? `*Image unavailable: ${reference.alt}*` : "");
+}
+
+async function fetchPublicImage(value: string, config: WebCaptureConfig): Promise<Omit<FetchedWebAsset, "ordinal" | "alt">> {
+  const sourceUrl = normalizeWebUrl(value);
+  let current = new URL(sourceUrl);
+  for (let redirects = 0; ; redirects += 1) {
+    const { response, bytes } = await requestOnce(current, config, null, config.maxAssetBytes, "image/avif,image/webp,image/png,image/jpeg,image/gif,image/bmp;q=0.8");
+    const status = response.statusCode ?? 0;
+    if ([301, 302, 303, 307, 308].includes(status) && response.headers.location) {
+      if (redirects >= config.maxRedirects) throw new AppError("too_many_web_redirects", "web asset exceeded the redirect guard", 422);
+      current = new URL(normalizeWebUrl(new URL(response.headers.location, current).toString()));
+      continue;
+    }
+    if (status < 200 || status >= 300) throw new AppError("web_asset_fetch_failed", `remote image returned HTTP ${status}`, 422);
+    const image = detectWebImage(bytes);
+    if (!image) throw new AppError("unsupported_web_asset", "web asset is not a supported raster image", 415);
+    const original = basename(current.pathname);
+    const stem = original.slice(0, Math.max(0, original.length - extname(original).length)).replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 120) || "image";
+    const filename = `${stem}.${image.extension}`;
+    const sha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex") as string;
+    return { sourceUrl, finalUrl: current.toString(), filename, mimeType: image.mimeType, bytes, sha256 };
+  }
+}
+
+function detectWebImage(bytes: Uint8Array): { mimeType: string; extension: string } | null {
+  const starts = (...values: number[]) => values.every((value, index) => bytes[index] === value);
+  if (starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return { mimeType: "image/png", extension: "png" };
+  if (starts(0xff, 0xd8, 0xff)) return { mimeType: "image/jpeg", extension: "jpg" };
+  if (bytes.length >= 6 && ["GIF87a", "GIF89a"].includes(new TextDecoder().decode(bytes.slice(0, 6)))) return { mimeType: "image/gif", extension: "gif" };
+  if (bytes.length >= 12 && new TextDecoder().decode(bytes.slice(0, 4)) === "RIFF" && new TextDecoder().decode(bytes.slice(8, 12)) === "WEBP") return { mimeType: "image/webp", extension: "webp" };
+  if (starts(0x42, 0x4d)) return { mimeType: "image/bmp", extension: "bmp" };
+  if (bytes.length >= 12 && new TextDecoder().decode(bytes.slice(4, 12)).startsWith("ftypavi")) return { mimeType: "image/avif", extension: "avif" };
+  return null;
 }
 
 function safeValidator(value: string | string[] | undefined): string | null {

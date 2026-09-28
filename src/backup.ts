@@ -20,7 +20,7 @@ interface ArchiveManifest {
   revisions: ArchiveEntry[];
   attachments: ArchiveEntry[];
   documents: Array<{ versions?: ArchiveEntry[] }>;
-  webCaptures: Array<{ snapshots?: Array<{ path: string; blobSha256: string; size?: number }> }>;
+  webCaptures: Array<{ snapshots?: Array<{ path: string; blobSha256: string; size?: number; assets?: Array<{ path: string; blobSha256: string; size?: number }> }> }>;
   research: unknown[];
   taxonomy: unknown[];
 }
@@ -112,6 +112,7 @@ export async function prepareRestore(path: string, stagingDataDir: string, limit
       if (foreignKeys.length) throw new Error("restored SQLite database has foreign-key violations");
       for (const attachment of store.allAttachments()) await requireBlob(store.attachmentFilePath(attachment.sha256), attachment.sha256);
       for (const version of store.allDocumentVersions()) await requireBlob(store.attachmentFilePath(version.sha256), version.sha256);
+      for (const asset of store.allWebCaptureAssets()) await requireBlob(store.attachmentFilePath(asset.blobSha256), asset.blobSha256);
       for (const snapshot of store.allWebCaptureSnapshots()) await requireBlob(store.attachmentFilePath(snapshot.blobSha256), snapshot.blobSha256);
     } finally { store.close(); }
     return summarize(extracted.manifest);
@@ -199,7 +200,10 @@ function verifyEntries(manifest: ArchiveManifest, hashes: Map<string, { sha256: 
   for (const entry of [...manifest.pages, ...manifest.trash, ...manifest.revisions]) requireEntry(entry, "Markdown");
   for (const entry of manifest.attachments) requireEntry(entry, "attachment", entry.sha256);
   for (const document of manifest.documents) for (const version of document.versions ?? []) requireEntry(version, "document", version.sha256);
-  for (const capture of manifest.webCaptures) for (const snapshot of capture.snapshots ?? []) requireEntry(snapshot, "web snapshot", snapshot.blobSha256);
+  for (const capture of manifest.webCaptures) for (const snapshot of capture.snapshots ?? []) {
+    requireEntry(snapshot, "web snapshot", snapshot.blobSha256);
+    for (const asset of snapshot.assets ?? []) requireEntry(asset, "web asset", asset.blobSha256);
+  }
   for (const name of hashes.keys()) if (!expected.has(name)) throw new Error(`backup contains unexpected entry '${name}'`);
 }
 
@@ -210,7 +214,10 @@ function archiveBlobs(manifest: ArchiveManifest): Map<string, { path: string; sh
   };
   for (const entry of manifest.attachments) if (entry.sha256) add(entry.path, entry.sha256);
   for (const document of manifest.documents) for (const version of document.versions ?? []) if (version.sha256) add(version.path, version.sha256);
-  for (const capture of manifest.webCaptures) for (const snapshot of capture.snapshots ?? []) add(snapshot.path, snapshot.blobSha256);
+  for (const capture of manifest.webCaptures) for (const snapshot of capture.snapshots ?? []) {
+    add(snapshot.path, snapshot.blobSha256);
+    for (const asset of snapshot.assets ?? []) add(asset.path, asset.blobSha256);
+  }
   return result;
 }
 

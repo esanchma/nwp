@@ -98,6 +98,7 @@ export function createFullExport(store: PageStore): { stream: ReadableStream; fi
   const documentVersions = store.allDocumentVersions();
   const webCaptures = store.allWebCaptures();
   const webSnapshots = store.allWebCaptureSnapshots();
+  const webAssets = store.allWebCaptureAssets();
   const research = store.allResearch();
   const taxonomy = store.listTagDefinitions();
   const generatedAt = new Date().toISOString();
@@ -121,7 +122,7 @@ export function createFullExport(store: PageStore): { stream: ReadableStream; fi
         revisions: revisions.map((revision) => ({ id: revision.id, pageId: revision.pageId, path: `history/${revision.pageId}/${revision.id}.md` })),
         attachments: attachments.map((attachment) => ({ ...attachment, path: `attachments/${attachment.sha256}` })),
         documents: documents.map((document) => ({ ...document, versions: documentVersions.filter((version) => version.documentId === document.id).map((version) => ({ ...version, path: `documents/${version.sha256}` })) })),
-        webCaptures: webCaptures.map((capture) => ({ ...capture, snapshots: webSnapshots.filter((snapshot) => snapshot.webCaptureId === capture.id).map((snapshot) => ({ ...snapshot, path: `web/${snapshot.blobSha256}` })) })),
+        webCaptures: webCaptures.map((capture) => ({ ...capture, snapshots: webSnapshots.filter((snapshot) => snapshot.webCaptureId === capture.id).map((snapshot) => ({ ...snapshot, path: `web/${snapshot.blobSha256}`, assets: webAssets.filter((asset) => asset.snapshotId === snapshot.id).map((asset) => ({ ...asset, path: `web-assets/${asset.blobSha256}` })) })) })),
         research,
         taxonomy,
       };
@@ -139,6 +140,9 @@ export function createFullExport(store: PageStore): { stream: ReadableStream; fi
       for (const hash of new Set(webSnapshots.map(({ blobSha256 }) => blobSha256))) {
         await addFile(pack, `web/${hash}`, store.attachmentFilePath(hash));
       }
+      for (const hash of new Set(webAssets.map(({ blobSha256 }) => blobSha256))) {
+        await addFile(pack, `web-assets/${hash}`, store.attachmentFilePath(hash));
+      }
       pack.finalize();
     } catch (error) {
       pack.destroy(error as Error);
@@ -151,6 +155,32 @@ export function createFullExport(store: PageStore): { stream: ReadableStream; fi
     stream: Readable.toWeb(output) as unknown as ReadableStream,
     filename: `nwp-export-${generatedAt.slice(0, 10)}.tar.gz`,
   };
+}
+
+export function createWebCaptureExport(store: PageStore, captureId: number): { stream: ReadableStream; filename: string } {
+  const capture = store.getWebCapture(captureId);
+  if (capture.documentId === null) throw new AppError("web_capture_not_ready", "web capture has no extracted content", 409);
+  const { document, path } = store.documentBlobPath(capture.documentId);
+  const assets = store.latestWebCaptureAssets(captureId);
+  const pack = tar.pack();
+  const gzip = createGzip({ level: 6 });
+  const output = pack.pipe(gzip);
+  void (async () => {
+    try {
+      let markdown = await Bun.file(path).text();
+      const resources = new Map<string, { path: string; sha256: string }>();
+      for (const asset of assets) {
+        const key = `${asset.blobSha256}/${asset.filename}`;
+        const resource = resources.get(key) ?? { path: `resources/${asset.blobSha256.slice(0, 12)}-${asset.filename}`, sha256: asset.blobSha256 };
+        resources.set(key, resource);
+        markdown = markdown.replaceAll(`/web-assets/${asset.blobSha256}/${encodeURIComponent(asset.filename)}`, resource.path);
+      }
+      await addBuffer(pack, "article.md", markdown);
+      for (const resource of resources.values()) await addFile(pack, resource.path, store.attachmentFilePath(resource.sha256));
+      pack.finalize();
+    } catch (error) { pack.destroy(error as Error); }
+  })();
+  return { stream: Readable.toWeb(output) as unknown as ReadableStream, filename: `${document.filename.replace(/\.md$/i, "")}-with-resources.tar.gz` };
 }
 
 function markdownDocument(frontMatter: FrontMatter, body: string): string {

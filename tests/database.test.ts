@@ -229,6 +229,7 @@ describe("PageStore", () => {
     original.db.run("DROP TABLE research_sources");
     original.db.run("DROP TABLE research_jobs");
     original.db.run("DROP TABLE web_capture_jobs");
+    original.db.run("DROP TABLE web_capture_assets");
     original.db.run("DROP TABLE web_capture_snapshots");
     original.db.run("DROP TABLE web_captures");
     original.db.run("DROP TABLE document_semantic_index");

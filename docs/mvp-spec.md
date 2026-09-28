@@ -253,6 +253,8 @@ Version 0.17 adds a responsive side-by-side Markdown editor and preview for page
 
 Version 0.18 adds richer server-rendered navigation. The Explore dashboard surfaces recent activity, highly linked pages, unconnected roots, popular tags, and the full hierarchy. Each page exposes its immediate neighborhood: child pages, outgoing active, deleted, or missing wiki-links, backlinks, and pages related through shared tags. Publication states remain visible, responsive cards collapse cleanly on small screens, and every destination has a stable shareable URL without requiring JavaScript.
 
+Version 0.19 preserves raster images from public web pages in their extracted document order. The worker downloads each image through the SSRF-resistant transport, validates its file signature, applies count and byte limits, stores it once by SHA-256, and associates it with an immutable capture snapshot. The document viewer permits only local content-addressed image URLs. Recapture creates a version when the HTML or any captured image changes. Complete backups include every referenced resource, while per-capture exports contain `article.md` and a relative `resources/` directory without remote or data URLs.
+
 ## Roadmap
 
 The following decisions describe the remaining product vision and do not expand the original MVP scope. The prioritized user-experience work was completed in versions 0.17 and 0.18; work now proceeds through portability and then operations.

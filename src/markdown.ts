@@ -49,15 +49,18 @@ export function renderMarkdown(markdown: string, resolveTarget: (alias: string) 
   return sanitizeHtml(html, {
     allowedTags: [
       "a", "blockquote", "br", "code", "del", "em", "h1", "h2", "h3", "h4", "h5", "h6",
-      "hr", "li", "ol", "p", "pre", "strong", "table", "tbody", "td", "th", "thead", "tr", "ul",
+      "hr", "img", "li", "ol", "p", "pre", "strong", "table", "tbody", "td", "th", "thead", "tr", "ul",
       "input",
     ],
     allowedAttributes: {
       a: ["href", "class", "aria-label"],
       input: ["type", "checked", "disabled"],
+      img: ["src", "alt", "title", "loading"],
       code: ["class"],
     },
     allowedSchemes: ["http", "https", "mailto"],
     allowProtocolRelative: false,
+    transformTags: { img: (_tagName, attributes) => ({ tagName: "img", attribs: { ...attributes, loading: "lazy" } }) },
+    exclusiveFilter: (frame) => frame.tag === "img" && !/^\/web-assets\/[a-f0-9]{64}\//.test(frame.attribs.src ?? ""),
   });
 }
