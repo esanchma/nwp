@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import { answerQuestion } from "./answer.ts";
-import type { DocumentRagConfig, RagAnswerConfig, SemanticSearchConfig, WebCaptureConfig } from "./config.ts";
+import type { DocumentRagConfig, RagAnswerConfig, ResearchConfig, SemanticSearchConfig, WebCaptureConfig } from "./config.ts";
 import type { PageStore } from "./database.ts";
 import { compareRevision } from "./history.ts";
 import type { Attachment } from "./domain.ts";
@@ -11,9 +11,9 @@ import { hybridSearch, lexicalSearch, OllamaEmbedder } from "./semantic.ts";
 import { ocrRuntimeStatus } from "./documents.ts";
 import { normalizeWebUrl } from "./web.ts";
 
-export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig, answerConfig?: RagAnswerConfig, webConfig?: WebCaptureConfig): (request: Request) => Promise<Response> {
+export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig, answerConfig?: RagAnswerConfig, webConfig?: WebCaptureConfig, researchConfig?: ResearchConfig): (request: Request) => Promise<Response> {
   return async (request) => {
-    const server = createServer(store, semanticConfig, documentConfig, answerConfig, webConfig);
+    const server = createServer(store, semanticConfig, documentConfig, answerConfig, webConfig, researchConfig);
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
@@ -24,9 +24,9 @@ export function createMcpHandler(store: PageStore, semanticConfig?: SemanticSear
   };
 }
 
-function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig, answerConfig?: RagAnswerConfig, webConfig?: WebCaptureConfig): McpServer {
+function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, documentConfig?: DocumentRagConfig, answerConfig?: RagAnswerConfig, webConfig?: WebCaptureConfig, researchConfig?: ResearchConfig): McpServer {
   const embedder = semanticConfig?.enabled ? new OllamaEmbedder(semanticConfig) : null;
-  const server = new McpServer({ name: "nwp", version: "0.14.0" });
+  const server = new McpServer({ name: "nwp", version: "0.15.0" });
   const statusSchema = z.enum(["draft", "published", "archived"]);
   const statusFilterSchema = z.enum(["draft", "published", "archived", "all"]);
   const propertiesSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]));
@@ -187,6 +187,54 @@ function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, d
     "retry_web_capture",
     { description: "Retry a failed or cancelled web capture", inputSchema: { capture_id: z.number().int().positive() } },
     async ({ capture_id }) => toolResult(store.retryWebCapture(capture_id)),
+  );
+
+  server.registerTool(
+    "refresh_web_capture",
+    { description: "Queue an immediate conditional refresh of an existing web capture", inputSchema: { capture_id: z.number().int().positive() } },
+    async ({ capture_id }) => toolResult(store.refreshWebCapture(capture_id)),
+  );
+
+  server.registerTool(
+    "schedule_web_capture",
+    { description: "Set or disable periodic refresh; intervals must be at least 300 seconds", inputSchema: { capture_id: z.number().int().positive(), refresh_interval_seconds: z.number().int().min(300).nullable() } },
+    async ({ capture_id, refresh_interval_seconds }) => toolResult(store.scheduleWebCapture(capture_id, refresh_interval_seconds)),
+  );
+
+  server.registerTool(
+    "queue_research",
+    { description: "Queue durable multi-source research with citation-backed synthesis", inputSchema: { query: z.string().min(1).max(4000), urls: z.array(z.string().url()).default([]), max_sources: z.number().int().min(1).max(100).optional() } },
+    async ({ query, urls, max_sources }) => {
+      if (!researchConfig?.enabled || !webConfig?.enabled || !documentConfig?.enabled || !answerConfig?.enabled) throw new Error("research dependencies are disabled");
+      const maximum = researchConfig.maximumSources;
+      const count = max_sources ?? researchConfig.defaultMaxSources;
+      if (count > maximum) throw new Error(`max_sources must not exceed ${maximum}`);
+      return toolResult(store.createResearch(query, urls.map(normalizeWebUrl), count));
+    },
+  );
+
+  server.registerTool(
+    "list_research",
+    { description: "List durable research jobs", inputSchema: {}, annotations: { readOnlyHint: true } },
+    async () => toolResult({ research: store.listResearch() }),
+  );
+
+  server.registerTool(
+    "get_research",
+    { description: "Get a research job, sources, and citation-backed result", inputSchema: { research_id: z.number().int().positive() }, annotations: { readOnlyHint: true } },
+    async ({ research_id }) => toolResult({ research: store.getResearch(research_id), sources: store.researchSources(research_id) }),
+  );
+
+  server.registerTool(
+    "cancel_research",
+    { description: "Cancel a queued or running research job", inputSchema: { research_id: z.number().int().positive() } },
+    async ({ research_id }) => toolResult(store.cancelResearch(research_id)),
+  );
+
+  server.registerTool(
+    "retry_research",
+    { description: "Retry failed or cancelled research", inputSchema: { research_id: z.number().int().positive() } },
+    async ({ research_id }) => toolResult(store.retryResearch(research_id)),
   );
 
   server.registerTool(

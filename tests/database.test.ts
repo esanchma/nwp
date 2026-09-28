@@ -202,6 +202,9 @@ describe("PageStore", () => {
     original.db.run("DROP TABLE document_section_search");
     original.db.run("DROP TABLE document_chunk_embeddings");
     original.db.run("DROP TABLE document_section_chunks");
+    original.db.run("DROP TABLE research_queue");
+    original.db.run("DROP TABLE research_sources");
+    original.db.run("DROP TABLE research_jobs");
     original.db.run("DROP TABLE web_capture_jobs");
     original.db.run("DROP TABLE web_capture_snapshots");
     original.db.run("DROP TABLE web_captures");

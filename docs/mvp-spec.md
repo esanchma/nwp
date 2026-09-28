@@ -244,6 +244,8 @@ Version 0.13 adds synchronous citation-grounded answers through configurable Oll
 
 Version 0.14 adds durable public-web capture. A leased SQLite worker fetches HTTP(S) pages, retains immutable content-addressed raw snapshots, creates bounded Markdown documents, and reuses document extraction and semantic indexing for search and cited answers. SSRF controls reject credentials and non-public destinations, validate every DNS answer and redirect, pin the validated address, and enforce content-type, compression, redirect, timeout, byte, and character guards. Captures have linked wiki pages, cancellation, retry, provenance metadata, complete-export coverage, and web, REST/OpenAPI, CLI, and MCP interfaces. Browser-rendered and authenticated sources remain outside this release.
 
+Version 0.15 adds manual and scheduled conditional recapture with `ETag` and `Last-Modified`, immutable changed snapshots, no-op handling for HTTP 304 or byte-identical responses, and document-version replacement that preserves human page edits. Durable multi-source research accepts explicit URLs or bounded discovery through an optional `web-research search` subprocess, while nwp retains control of every SSRF-resistant fetch. Research waits for extraction, restricts retrieval to the selected document IDs, generates citation-validated synthesis without general model knowledge, and persists jobs, sources, results, retries, and cancellation across web, REST/OpenAPI, CLI, MCP, and complete exports.
+
 ## Roadmap
 
 The following decisions describe the remaining product vision and do not expand the original MVP scope.

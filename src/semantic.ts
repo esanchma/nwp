@@ -231,7 +231,7 @@ function pageSearchEligible(filters: DocumentSearchFilters): boolean {
 }
 
 function documentFiltersActive(filters: DocumentSearchFilters): boolean {
-  return filters.documentId !== undefined || filters.format !== undefined || filters.version !== undefined || filters.ocrStatus !== undefined || filters.hidden !== undefined || filters.kind !== undefined || filters.updatedAfter !== undefined || filters.updatedBefore !== undefined;
+  return filters.documentId !== undefined || Boolean(filters.documentIds?.length) || filters.format !== undefined || filters.version !== undefined || filters.ocrStatus !== undefined || filters.hidden !== undefined || filters.kind !== undefined || filters.updatedAfter !== undefined || filters.updatedBefore !== undefined;
 }
 
 function suppressLinkedPageDuplicates(scores: Map<string, number>, hits: Map<string, SearchHit>): void {

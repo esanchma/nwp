@@ -52,7 +52,7 @@ describe("secure web capture", () => {
     expect(store.getById(capture.pageId).tags).toContain("source:web");
     const task = store.claimWebCaptureTask("test-owner")!;
     const html = new TextEncoder().encode("<title>Leave policy</title><p>Employees receive sixteen weeks of paid leave.</p>");
-    store.completeWebCaptureTask(task, { requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: html, title: "Leave policy", markdown: "# Leave policy\n\nSource: https://example.com/policy\n\nEmployees receive sixteen weeks of paid leave." }, documentConfig.maxFileBytes);
+    store.completeWebCaptureTask(task, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: html, title: "Leave policy", etag: null, lastModified: null, markdown: "# Leave policy\n\nSource: https://example.com/policy\n\nEmployees receive sixteen weeks of paid leave." }, documentConfig.maxFileBytes);
     const completed = store.getWebCapture(capture.id);
     expect(completed).toMatchObject({ status: "ready", title: "Leave policy", httpStatus: 200 });
     expect(completed.documentId).toBeNumber();
@@ -60,6 +60,34 @@ describe("secure web capture", () => {
     expect(store.getDocument(completed.documentId!).status).toBe("queued");
     expect(await new DocumentWorker(store, documentConfig).runUntilIdle()).toBe(1);
     expect(store.documentSections(completed.documentId!)[0]!.text).toContain("Leave policy");
+  });
+
+  test("refreshes conditionally, retains changed versions, and schedules due work", async () => {
+    const capture = store.createWebCapture("https://example.com/versioned", "rest");
+    const first = store.claimWebCaptureTask("owner-1")!;
+    store.completeWebCaptureTask(first, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: new TextEncoder().encode("<p>version one</p>"), title: "Versioned", markdown: "# Versioned\n\nversion one", etag: '"v1"', lastModified: "Wed, 01 Jan 2025 00:00:00 GMT" }, documentConfig.maxFileBytes);
+    const documentId = store.getWebCapture(capture.id).documentId!;
+    await new DocumentWorker(store, documentConfig).runUntilIdle();
+
+    store.refreshWebCapture(capture.id);
+    const second = store.claimWebCaptureTask("owner-2")!;
+    expect(second).toMatchObject({ etag: '"v1"', lastModified: "Wed, 01 Jan 2025 00:00:00 GMT" });
+    store.completeWebCaptureTask(second, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/html", bytes: new TextEncoder().encode("<p>version two</p>"), title: "Versioned", markdown: "# Versioned\n\nversion two", etag: '"v2"', lastModified: "Thu, 02 Jan 2025 00:00:00 GMT" }, documentConfig.maxFileBytes);
+    expect(store.listDocumentVersions(documentId)).toHaveLength(2);
+    expect(store.listWebCaptureSnapshots(capture.id)).toHaveLength(2);
+    await new DocumentWorker(store, documentConfig).runUntilIdle();
+
+    store.refreshWebCapture(capture.id);
+    const third = store.claimWebCaptureTask("owner-3")!;
+    store.completeWebCaptureTask(third, { kind: "not_modified", requestedUrl: capture.url, finalUrl: capture.url, status: 304, etag: '"v2"', lastModified: "Thu, 02 Jan 2025 00:00:00 GMT" }, documentConfig.maxFileBytes);
+    expect(store.getWebCapture(capture.id)).toMatchObject({ status: "ready", httpStatus: 304, etag: '"v2"' });
+    expect(store.listDocumentVersions(documentId)).toHaveLength(2);
+
+    expect(store.scheduleWebCapture(capture.id, 300).refreshIntervalSeconds).toBe(300);
+    store.db.run("UPDATE web_captures SET next_refresh_at = ? WHERE id = ?", [new Date(0).toISOString(), capture.id]);
+    expect(store.enqueueDueWebCaptures()).toBe(1);
+    expect(store.getWebCapture(capture.id).status).toBe("queued");
+    expect(store.scheduleWebCapture(capture.id, null).refreshIntervalSeconds).toBeNull();
   });
 
   test("supports cancellation, safe stale completion, and retry", () => {
@@ -70,7 +98,7 @@ describe("secure web capture", () => {
     expect(store.retryWebCapture(capture.id).status).toBe("queued");
     const stale = store.claimWebCaptureTask("test-owner-2")!;
     expect(store.cancelWebCapture(capture.id).status).toBe("cancelled");
-    store.completeWebCaptureTask(stale, { requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/plain", bytes: new TextEncoder().encode("stale"), title: "Stale", markdown: "# Stale" }, documentConfig.maxFileBytes);
+    store.completeWebCaptureTask(stale, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/plain", bytes: new TextEncoder().encode("stale"), title: "Stale", etag: null, lastModified: null, markdown: "# Stale" }, documentConfig.maxFileBytes);
     expect(store.getWebCapture(capture.id)).toMatchObject({ status: "cancelled", documentId: null });
   });
 });

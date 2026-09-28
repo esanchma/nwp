@@ -2,7 +2,7 @@
 
 nwp (nano-wiki-pi) is a small local wiki for people and development agents. It provides a server-rendered web interface, a CLI, and MCP tools over one SQLite database.
 
-nwp supports page creation, reading, listing, editing, hybrid full-text and semantic search, durable document extraction with local OCR, secure durable web capture, citation-grounded answers, revision history, restoration, a recoverable trash, deduplicated file attachments, publication states, custom properties, parent-child navigation, and portable import/export. Pages use GitHub Flavored Markdown, `[[wiki-links]]`, backlinks, and tags. nwp stores a complete snapshot before each meaningful edit.
+nwp supports page creation, reading, listing, editing, hybrid full-text and semantic search, durable document extraction with local OCR, versioned web capture, durable multi-source research, citation-grounded answers, revision history, restoration, a recoverable trash, deduplicated file attachments, publication states, custom properties, parent-child navigation, and portable import/export. Pages use GitHub Flavored Markdown, `[[wiki-links]]`, backlinks, and tags. nwp stores a complete snapshot before each meaningful edit.
 
 ## Requirements
 
@@ -71,7 +71,15 @@ timeout_seconds = 30
 max_redirects = 5
 max_response_bytes = 20971520
 max_extracted_characters = 2000000
-user_agent = "nwp/0.14 (+local knowledge capture)"
+user_agent = "nwp/0.15 (+local knowledge capture)"
+
+[research]
+enabled = true
+search_command = "" # optional path to the web-research executable
+search_timeout_seconds = 60
+max_search_output_bytes = 2097152
+default_max_sources = 5
+maximum_sources = 20
 
 [document_rag]
 enabled = true
@@ -151,9 +159,16 @@ Page commands connect to the running local server and read the generated token a
 ./dist/nwp web add https://example.com/article
 ./dist/nwp web list
 ./dist/nwp web get 1
+./dist/nwp web refresh 1
+./dist/nwp web schedule 1 --interval 86400
+./dist/nwp web schedule 1 --interval off
 ./dist/nwp web cancel 1
 ./dist/nwp web retry 1
 ./dist/nwp web run --json
+./dist/nwp research add "Compare the parental leave policies" --urls "https://example.com/policy-a,https://example.org/policy-b"
+./dist/nwp research list
+./dist/nwp research get 1
+./dist/nwp research run 1
 ./dist/nwp index status --json
 ./dist/nwp index run
 ./dist/nwp export page 1 --output installation-guide.md
@@ -189,7 +204,11 @@ Available operations:
 - `GET|POST /api/v1/documents`
 - `GET|POST /api/v1/web-captures`
 - `GET /api/v1/web-captures/:id`
-- `POST /api/v1/web-captures/:id/cancel|retry`
+- `POST /api/v1/web-captures/:id/refresh|cancel|retry`
+- `PUT /api/v1/web-captures/:id/schedule`
+- `GET|POST /api/v1/research`
+- `GET /api/v1/research/:id`
+- `POST /api/v1/research/:id/cancel|retry`
 - `GET /api/v1/documents/ocr/status`
 - `GET /api/v1/documents/:id`
 - `GET|POST /api/v1/documents/:id/versions`
@@ -264,6 +283,13 @@ Tools:
 - `get_web_capture`
 - `cancel_web_capture`
 - `retry_web_capture`
+- `refresh_web_capture`
+- `schedule_web_capture`
+- `queue_research`
+- `list_research`
+- `get_research`
+- `cancel_research`
+- `retry_research`
 - `export_page`
 - `import_page`
 - `get_full_export`
@@ -294,7 +320,7 @@ A complete export is a streaming `tar.gz` containing:
 - each deduplicated attachment blob under `attachments/`;
 - original document versions under `documents/`;
 - retained raw web responses under `web/`;
-- `manifest.json` with format version, associations, taxonomy, document parser metadata, and web capture provenance.
+- `manifest.json` with format version, associations, taxonomy, document parser metadata, web capture provenance, and research results.
 
 The archive is intended for portable backup and inspection. Page import accepts individual Markdown documents; restoring a complete archive into a database is part of the upcoming operational backup/restore tooling.
 
@@ -336,7 +362,15 @@ Queue a public page from `/web-captures`, `nwp web add`, REST, or MCP. The durab
 
 Network access is deliberately narrow: only HTTP(S) is allowed; URL credentials, localhost, private, loopback, link-local, multicast, documentation, and reserved addresses are blocked. nwp resolves every redirect independently, rejects any hostname with a non-public DNS answer, pins the validated address for the connection, sends no cookies or credentials, accepts only textual content, disables compression, and enforces redirect, timeout, response-byte, and extracted-character guards. Web content remains untrusted evidence and cannot issue model or tool instructions.
 
-A failed capture retries with a leased SQLite job up to three times. Cancellation and retry are explicit. Run capture with `nwp worker`, `nwp serve --with-worker`, or the one-shot `nwp web run`. The initial extractor is deterministic and native; browser-rendered and authenticated pages are intentionally outside this release.
+A failed capture retries with a leased SQLite job up to three times. Cancellation and retry are explicit. Existing captures can be refreshed manually or hourly, daily, weekly, or at another interval of at least five minutes. Refresh requests use retained `ETag` and `Last-Modified` validators. HTTP 304 and byte-identical responses do not create document versions; changed responses retain a new raw snapshot and queue an explicit document version while preserving human page edits.
+
+Run capture with `nwp worker`, `nwp serve --with-worker`, or the one-shot `nwp web run`. The extractor remains deterministic and native; browser-rendered and authenticated pages are intentionally outside this release.
+
+## Multi-source research
+
+Research jobs combine source discovery, secure capture, document extraction, retrieval, and citation-grounded synthesis in one durable workflow. Supply URLs explicitly or configure `research.search_command` with the path to the `web-research` executable. nwp invokes only its `search` operation without a shell, parses URL records from bounded output, and passes every result through the same public-network policy. The external adapter never performs the authoritative capture.
+
+Each research job records its selected captures, waits for usable document versions, restricts retrieval to those exact documents, and stores the validated answer and citations. Jobs have leases, retry and cancellation semantics and are available through `/research`, CLI, REST, MCP, and complete exports. General model knowledge is disabled for research synthesis.
 
 ## Trash
 
@@ -386,7 +420,8 @@ The main modules are:
 
 - `src/database.ts`: migrations and page/document persistence
 - `src/documents.ts`: safe document detection, extraction, and durable worker
-- `src/web.ts`: SSRF-resistant HTTP capture, deterministic extraction, and durable worker
+- `src/web.ts`: SSRF-resistant HTTP capture, conditional refresh, deterministic extraction, and durable worker
+- `src/research.ts`: bounded source discovery and durable multi-source cited synthesis
 - `src/domain.ts`: validation and domain rules
 - `src/server.ts`: web and JSON HTTP handlers
 - `src/mcp.ts`: MCP tools and transport

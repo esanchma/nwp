@@ -50,6 +50,15 @@ export interface WebCaptureConfig {
   userAgent: string;
 }
 
+export interface ResearchConfig {
+  enabled: boolean;
+  searchCommand: string;
+  searchTimeoutSeconds: number;
+  maxSearchOutputBytes: number;
+  defaultMaxSources: number;
+  maximumSources: number;
+}
+
 export interface Config {
   host: string;
   port: number;
@@ -62,6 +71,7 @@ export interface Config {
   documentRag: DocumentRagConfig;
   ragAnswer: RagAnswerConfig;
   webCapture: WebCaptureConfig;
+  research: ResearchConfig;
 }
 
 export interface ConfigOverrides {
@@ -131,7 +141,16 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     maxRedirects: numberValue(web.max_redirects, "web_capture.max_redirects", 5),
     maxResponseBytes: numberValue(web.max_response_bytes, "web_capture.max_response_bytes", 20 * 1024 * 1024),
     maxExtractedCharacters: numberValue(web.max_extracted_characters, "web_capture.max_extracted_characters", 2_000_000),
-    userAgent: stringValue(web.user_agent, "web_capture.user_agent", "nwp/0.14 (+local knowledge capture)"),
+    userAgent: stringValue(web.user_agent, "web_capture.user_agent", "nwp/0.15 (+local knowledge capture)"),
+  };
+  const researchInput = objectValue(file.research, "research");
+  const research: ResearchConfig = {
+    enabled: booleanValue(researchInput.enabled, "research.enabled", true),
+    searchCommand: stringValue(researchInput.search_command, "research.search_command", "", true),
+    searchTimeoutSeconds: numberValue(researchInput.search_timeout_seconds, "research.search_timeout_seconds", 60),
+    maxSearchOutputBytes: numberValue(researchInput.max_search_output_bytes, "research.max_search_output_bytes", 2 * 1024 * 1024),
+    defaultMaxSources: numberValue(researchInput.default_max_sources, "research.default_max_sources", 5),
+    maximumSources: numberValue(researchInput.maximum_sources, "research.maximum_sources", 20),
   };
   const documents = objectValue(file.document_rag, "document_rag");
   const documentRag: DocumentRagConfig = {
@@ -165,6 +184,12 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
   if (webCapture.maxRedirects > 20) throw new Error("web_capture.max_redirects must not exceed 20");
   if (webCapture.userAgent.length > 256 || /[\r\n]/.test(webCapture.userAgent)) throw new Error("web_capture.user_agent must be a single line of at most 256 characters");
 
+  for (const [name, value] of Object.entries({ search_timeout_seconds: research.searchTimeoutSeconds, max_search_output_bytes: research.maxSearchOutputBytes, default_max_sources: research.defaultMaxSources, maximum_sources: research.maximumSources })) {
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error(`research.${name} must be a positive integer`);
+  }
+  if (research.defaultMaxSources > research.maximumSources || research.maximumSources > 100) throw new Error("research source limits are inconsistent or exceed 100");
+  if (research.searchCommand && (research.searchCommand.length > 4096 || /[\r\n]/.test(research.searchCommand))) throw new Error("research.search_command must be a single executable path");
+
   for (const [name, value] of Object.entries({ max_file_bytes: documentRag.maxFileBytes, max_expanded_bytes: documentRag.maxExpandedBytes, max_archive_entries: documentRag.maxArchiveEntries, max_compression_ratio: documentRag.maxCompressionRatio, max_pdf_pages: documentRag.maxPdfPages, max_spreadsheet_cells: documentRag.maxSpreadsheetCells, ocr_timeout_seconds: documentRag.ocrTimeoutSeconds, max_ocr_items: documentRag.maxOcrItems, max_ocr_output_characters: documentRag.maxOcrOutputCharacters })) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error(`document_rag.${name} must be a positive integer`);
   }
@@ -190,6 +215,7 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     documentRag,
     ragAnswer,
     webCapture,
+    research,
   };
 }
 

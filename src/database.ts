@@ -38,6 +38,9 @@ import {
   type Revision,
   type RevisionList,
   type RevisionSummary,
+  type ResearchJob,
+  type ResearchSource,
+  type ResearchStatus,
   type SearchResults,
   type SemanticStatus,
   type TagDefinition,
@@ -49,7 +52,7 @@ import {
   type WebCaptureStatus,
 } from "./domain.ts";
 import type { ExtractedDocument } from "./documents.ts";
-import type { FetchedWebPage } from "./web.ts";
+import type { WebFetchResult } from "./web.ts";
 
 interface PageRow {
   id: number;
@@ -141,10 +144,42 @@ interface WebCaptureRow {
   title: string | null;
   content_type: string | null;
   http_status: number | null;
+  etag: string | null;
+  last_modified: string | null;
   last_error: string | null;
   fetched_at: string | null;
+  last_checked_at: string | null;
+  refresh_interval_seconds: number | null;
+  next_refresh_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface WebSnapshotRow {
+  id: number;
+  web_capture_id: number;
+  blob_sha256: string;
+  final_url: string;
+  http_status: number;
+  content_type: string;
+  title: string | null;
+  etag: string | null;
+  last_modified: string | null;
+  size: number;
+  fetched_at: string;
+}
+
+interface ResearchRow {
+  id: number;
+  query: string;
+  requested_urls_json: string;
+  max_sources: number;
+  status: ResearchStatus;
+  result_json: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 }
 
 interface RevisionRow {
@@ -547,6 +582,47 @@ const migrations = [
       last_error TEXT
     );
   `,
+  `
+    ALTER TABLE web_captures ADD COLUMN etag TEXT;
+    ALTER TABLE web_captures ADD COLUMN last_modified TEXT;
+    ALTER TABLE web_captures ADD COLUMN last_checked_at TEXT;
+    ALTER TABLE web_captures ADD COLUMN refresh_interval_seconds INTEGER CHECK (refresh_interval_seconds IS NULL OR refresh_interval_seconds >= 300);
+    ALTER TABLE web_captures ADD COLUMN next_refresh_at TEXT;
+    ALTER TABLE web_capture_snapshots ADD COLUMN etag TEXT;
+    ALTER TABLE web_capture_snapshots ADD COLUMN last_modified TEXT;
+    CREATE INDEX web_captures_refresh_idx ON web_captures(next_refresh_at) WHERE refresh_interval_seconds IS NOT NULL;
+
+    CREATE TABLE research_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      query TEXT NOT NULL,
+      requested_urls_json TEXT NOT NULL DEFAULT '[]',
+      max_sources INTEGER NOT NULL CHECK (max_sources > 0 AND max_sources <= 100),
+      status TEXT NOT NULL CHECK (status IN ('queued', 'researching', 'ready', 'failed', 'cancelled')),
+      result_json TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+    CREATE INDEX research_jobs_status_idx ON research_jobs(status, updated_at DESC);
+    CREATE TABLE research_sources (
+      research_id INTEGER NOT NULL REFERENCES research_jobs(id) ON DELETE CASCADE,
+      web_capture_id INTEGER NOT NULL REFERENCES web_captures(id) ON DELETE CASCADE,
+      url TEXT NOT NULL,
+      PRIMARY KEY (research_id, web_capture_id),
+      UNIQUE (research_id, url)
+    );
+    CREATE TABLE research_queue (
+      research_id INTEGER PRIMARY KEY REFERENCES research_jobs(id) ON DELETE CASCADE,
+      requested_at TEXT NOT NULL,
+      available_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      revision INTEGER NOT NULL DEFAULT 1,
+      lease_owner TEXT,
+      lease_until TEXT,
+      last_error TEXT
+    );
+  `,
 ];
 
 export interface SemanticIndexConfig {
@@ -561,7 +637,8 @@ export interface SemanticIndexTask { pageId: number; revision: number; page: Pag
 export interface DocumentSemanticTask { documentId: number; versionId: number; revision: number; owner: string; document: DocumentRecord | null; sections: DocumentSection[] }
 export interface DocumentChunkInput { sectionId: number; ordinal: number; content: string }
 export interface DocumentTask { documentId: number; versionId: number; revision: number; owner: string }
-export interface WebCaptureTask { webCaptureId: number; pageId: number; url: string; revision: number; owner: string }
+export interface WebCaptureTask { webCaptureId: number; pageId: number; url: string; finalUrl: string | null; etag: string | null; lastModified: string | null; revision: number; owner: string }
+export interface ResearchTask { researchId: number; revision: number; owner: string; job: ResearchJob }
 export interface SemanticNeighbor { pageId: number; chunkId: number; content: string; distance: number }
 export interface DocumentSemanticNeighbor extends DocumentSearchResult { chunkId: number; content: string; distance: number }
 
@@ -1051,7 +1128,11 @@ export class PageStore {
   }
 
   allWebCaptureSnapshots(): WebCaptureSnapshot[] {
-    return this.db.query<{ id: number; web_capture_id: number; blob_sha256: string; final_url: string; http_status: number; content_type: string; title: string | null; size: number; fetched_at: string }, []>("SELECT * FROM web_capture_snapshots ORDER BY web_capture_id, id").all().map((row) => ({ id: row.id, webCaptureId: row.web_capture_id, blobSha256: row.blob_sha256, finalUrl: row.final_url, httpStatus: row.http_status, contentType: row.content_type, title: row.title, size: row.size, fetchedAt: row.fetched_at }));
+    return this.db.query<WebSnapshotRow, []>("SELECT * FROM web_capture_snapshots ORDER BY web_capture_id, id").all().map(hydrateWebSnapshot);
+  }
+
+  allResearch(): Array<ResearchJob & { sources: ResearchSource[] }> {
+    return this.db.query<ResearchRow, []>("SELECT * FROM research_jobs ORDER BY id").all().map((row) => ({ ...hydrateResearch(row), sources: this.researchSources(row.id) }));
   }
 
   attachmentFilePath(sha256: string): string {
@@ -1132,17 +1213,54 @@ export class PageStore {
 
   listWebCaptureSnapshots(id: number): WebCaptureSnapshot[] {
     this.getWebCapture(id);
-    return this.db.query<{ id: number; web_capture_id: number; blob_sha256: string; final_url: string; http_status: number; content_type: string; title: string | null; size: number; fetched_at: string }, [number]>("SELECT * FROM web_capture_snapshots WHERE web_capture_id = ? ORDER BY id DESC").all(id).map((row) => ({ id: row.id, webCaptureId: row.web_capture_id, blobSha256: row.blob_sha256, finalUrl: row.final_url, httpStatus: row.http_status, contentType: row.content_type, title: row.title, size: row.size, fetchedAt: row.fetched_at }));
+    return this.db.query<WebSnapshotRow, [number]>("SELECT * FROM web_capture_snapshots WHERE web_capture_id = ? ORDER BY id DESC").all(id).map(hydrateWebSnapshot);
+  }
+
+  webCaptureByUrl(url: string): WebCapture | null {
+    const row = this.db.query<WebCaptureRow, [string]>("SELECT wc.* FROM web_captures wc JOIN pages p ON p.id = wc.page_id WHERE wc.url = ? AND p.deleted_at IS NULL").get(url);
+    return row ? hydrateWebCapture(row) : null;
+  }
+
+  refreshWebCapture(id: number): WebCapture {
+    const capture = this.getWebCapture(id);
+    if (capture.status === "queued" || capture.status === "fetching") throw new AppError("web_capture_running", "web capture is already queued or running", 409);
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.run("INSERT INTO web_capture_jobs(web_capture_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, 0, 1) ON CONFLICT(web_capture_id) DO UPDATE SET requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = web_capture_jobs.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [id, now, now]);
+      this.db.run("UPDATE web_captures SET status = 'queued', last_error = NULL, next_refresh_at = NULL, updated_at = ? WHERE id = ?", [now, id]);
+    }).immediate();
+    return this.getWebCapture(id);
+  }
+
+  scheduleWebCapture(id: number, intervalSeconds: number | null): WebCapture {
+    this.getWebCapture(id);
+    if (intervalSeconds !== null && (!Number.isSafeInteger(intervalSeconds) || intervalSeconds < 300)) throw new AppError("invalid_refresh_interval", "refresh interval must be null or at least 300 seconds", 400);
+    const now = new Date();
+    const next = intervalSeconds === null ? null : new Date(now.getTime() + intervalSeconds * 1000).toISOString();
+    this.db.run("UPDATE web_captures SET refresh_interval_seconds = ?, next_refresh_at = ?, updated_at = ? WHERE id = ?", [intervalSeconds, next, now.toISOString(), id]);
+    return this.getWebCapture(id);
+  }
+
+  enqueueDueWebCaptures(): number {
+    const now = new Date().toISOString();
+    return this.db.transaction(() => {
+      const rows = this.db.query<{ id: number }, [string]>("SELECT wc.id FROM web_captures wc JOIN pages p ON p.id = wc.page_id WHERE p.deleted_at IS NULL AND wc.refresh_interval_seconds IS NOT NULL AND wc.next_refresh_at <= ? AND wc.status NOT IN ('queued', 'fetching')").all(now);
+      for (const { id } of rows) {
+        this.db.run("INSERT INTO web_capture_jobs(web_capture_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, 0, 1) ON CONFLICT(web_capture_id) DO UPDATE SET requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = web_capture_jobs.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [id, now, now]);
+        this.db.run("UPDATE web_captures SET status = 'queued', next_refresh_at = NULL, updated_at = ? WHERE id = ?", [now, id]);
+      }
+      return rows.length;
+    }).immediate();
   }
 
   claimWebCaptureTask(owner: string, leaseMilliseconds = 5 * 60_000): WebCaptureTask | null {
     const now = new Date();
     return this.db.transaction(() => {
-      const row = this.db.query<{ web_capture_id: number; page_id: number; url: string; revision: number }, [string, string]>("SELECT j.web_capture_id, wc.page_id, wc.url, j.revision FROM web_capture_jobs j JOIN web_captures wc ON wc.id = j.web_capture_id JOIN pages p ON p.id = wc.page_id WHERE p.deleted_at IS NULL AND j.attempts < 3 AND j.available_at <= ? AND (j.lease_until IS NULL OR j.lease_until < ?) ORDER BY j.requested_at, j.web_capture_id LIMIT 1").get(now.toISOString(), now.toISOString());
+      const row = this.db.query<{ web_capture_id: number; page_id: number; url: string; final_url: string | null; etag: string | null; last_modified: string | null; revision: number }, [string, string]>("SELECT j.web_capture_id, wc.page_id, wc.url, wc.final_url, wc.etag, wc.last_modified, j.revision FROM web_capture_jobs j JOIN web_captures wc ON wc.id = j.web_capture_id JOIN pages p ON p.id = wc.page_id WHERE p.deleted_at IS NULL AND j.attempts < 3 AND j.available_at <= ? AND (j.lease_until IS NULL OR j.lease_until < ?) ORDER BY j.requested_at, j.web_capture_id LIMIT 1").get(now.toISOString(), now.toISOString());
       if (!row) return null;
       this.db.run("UPDATE web_capture_jobs SET lease_owner = ?, lease_until = ? WHERE web_capture_id = ? AND revision = ?", [owner, new Date(now.getTime() + leaseMilliseconds).toISOString(), row.web_capture_id, row.revision]);
       this.db.run("UPDATE web_captures SET status = 'fetching', updated_at = ? WHERE id = ?", [now.toISOString(), row.web_capture_id]);
-      return { webCaptureId: row.web_capture_id, pageId: row.page_id, url: row.url, revision: row.revision, owner };
+      return { webCaptureId: row.web_capture_id, pageId: row.page_id, url: row.url, finalUrl: row.final_url, etag: row.etag, lastModified: row.last_modified, revision: row.revision, owner };
     }).immediate();
   }
 
@@ -1150,28 +1268,66 @@ export class PageStore {
     return this.db.run("UPDATE web_capture_jobs SET lease_until = ? WHERE web_capture_id = ? AND revision = ? AND lease_owner = ?", [new Date(Date.now() + leaseMilliseconds).toISOString(), task.webCaptureId, task.revision, task.owner]).changes === 1;
   }
 
-  completeWebCaptureTask(task: WebCaptureTask, result: FetchedWebPage, maxDocumentBytes: number): void {
+  completeWebCaptureTask(task: WebCaptureTask, result: WebFetchResult, maxDocumentBytes: number): void {
     const lease = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM web_capture_jobs WHERE web_capture_id = ?").get(task.webCaptureId);
     if (!lease || lease.revision !== task.revision || lease.lease_owner !== task.owner) return;
+    const now = new Date();
+    const checkedAt = now.toISOString();
+    const capture = this.getWebCapture(task.webCaptureId);
+    const nextRefresh = capture.refreshIntervalSeconds === null ? null : new Date(now.getTime() + capture.refreshIntervalSeconds * 1000).toISOString();
+    if (result.kind === "not_modified") {
+      this.db.transaction(() => {
+        const current = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM web_capture_jobs WHERE web_capture_id = ?").get(task.webCaptureId);
+        if (!current || current.revision !== task.revision || current.lease_owner !== task.owner) return;
+        this.db.run("UPDATE web_captures SET final_url = ?, status = 'ready', http_status = 304, etag = ?, last_modified = ?, last_error = NULL, last_checked_at = ?, next_refresh_at = ?, updated_at = ? WHERE id = ?", [result.finalUrl, result.etag, result.lastModified, checkedAt, nextRefresh, checkedAt, task.webCaptureId]);
+        this.db.run("DELETE FROM web_capture_jobs WHERE web_capture_id = ? AND revision = ?", [task.webCaptureId, task.revision]);
+      }).immediate();
+      return;
+    }
     const markdownBytes = new TextEncoder().encode(result.markdown);
     if (markdownBytes.byteLength > maxDocumentBytes) throw new AppError("document_too_large", `captured Markdown exceeds the technical ${maxDocumentBytes} byte guard`, 413);
     const pageBefore = this.getById(task.pageId);
-    if (pageBefore.title === webCapturePageTitle(task.url) && result.title) this.update(task.pageId, { title: result.title }, "web");
+    const managedBefore = capture.documentId === null ? null : this.db.query<DocumentRow, [number]>("SELECT * FROM documents WHERE id = ?").get(capture.documentId)!;
+    const humanEditedBefore = managedBefore !== null && (pageBefore.title !== managedBefore.managed_title || pageBefore.body !== managedBefore.managed_body || JSON.stringify(pageBefore.tags) !== managedBefore.managed_tags_json || JSON.stringify(pageBefore.properties) !== managedBefore.managed_properties_json);
+    if (!humanEditedBefore && (pageBefore.title === webCapturePageTitle(task.url) || pageBefore.title === capture.title) && result.title) this.update(task.pageId, { title: result.title }, "web");
     const page = this.getById(task.pageId);
-    const now = new Date().toISOString();
-    const rawHash = this.ensureBlob(result.bytes, result.contentType, now);
-    const markdownHash = this.ensureBlob(markdownBytes, "text/markdown", now);
+    const rawHash = this.ensureBlob(result.bytes, result.contentType, checkedAt);
+    const previousHash = this.db.query<{ blob_sha256: string }, [number]>("SELECT blob_sha256 FROM web_capture_snapshots WHERE web_capture_id = ? ORDER BY id DESC LIMIT 1").get(task.webCaptureId)?.blob_sha256;
+    if (previousHash === rawHash) {
+      this.db.transaction(() => {
+        const current = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM web_capture_jobs WHERE web_capture_id = ?").get(task.webCaptureId);
+        if (!current || current.revision !== task.revision || current.lease_owner !== task.owner) return;
+        this.db.run("UPDATE web_captures SET final_url = ?, status = 'ready', title = ?, content_type = ?, http_status = ?, etag = ?, last_modified = ?, last_error = NULL, last_checked_at = ?, next_refresh_at = ?, updated_at = ? WHERE id = ?", [result.finalUrl, result.title, result.contentType, result.status, result.etag, result.lastModified, checkedAt, nextRefresh, checkedAt, task.webCaptureId]);
+        this.db.run("DELETE FROM web_capture_jobs WHERE web_capture_id = ? AND revision = ?", [task.webCaptureId, task.revision]);
+      }).immediate();
+      return;
+    }
+    const markdownHash = this.ensureBlob(markdownBytes, "text/markdown", checkedAt);
     try {
       const completed = this.db.transaction(() => {
         const current = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM web_capture_jobs WHERE web_capture_id = ?").get(task.webCaptureId);
         if (!current || current.revision !== task.revision || current.lease_owner !== task.owner) return false;
         const filename = `${slugify(result.title) || `web-capture-${task.webCaptureId}`}.md`;
-        const document = this.db.run("INSERT INTO documents(page_id, filename, mime_type, format, status, managed_title, managed_body, managed_tags_json, managed_properties_json, created_at, updated_at) VALUES (?, ?, 'text/markdown', 'markdown', 'queued', ?, ?, ?, ?, ?, ?)", [task.pageId, filename, page.title, page.body, JSON.stringify(page.tags), JSON.stringify(page.properties), now, now]);
-        const documentId = Number(document.lastInsertRowid);
-        const version = this.db.run("INSERT INTO document_versions(document_id, version, blob_sha256, status, created_at) VALUES (?, 1, ?, 'queued', ?)", [documentId, markdownHash, now]);
-        this.db.run("INSERT INTO document_jobs(document_id, version_id, requested_at, available_at) VALUES (?, ?, ?, ?)", [documentId, Number(version.lastInsertRowid), now, now]);
-        this.db.run("INSERT INTO web_capture_snapshots(web_capture_id, blob_sha256, final_url, http_status, content_type, title, size, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [task.webCaptureId, rawHash, result.finalUrl, result.status, result.contentType, result.title, result.bytes.byteLength, now]);
-        this.db.run("UPDATE web_captures SET document_id = ?, final_url = ?, status = 'ready', title = ?, content_type = ?, http_status = ?, last_error = NULL, fetched_at = ?, updated_at = ? WHERE id = ?", [documentId, result.finalUrl, result.title, result.contentType, result.status, now, now, task.webCaptureId]);
+        let documentId = capture.documentId;
+        if (documentId === null) {
+          const document = this.db.run("INSERT INTO documents(page_id, filename, mime_type, format, status, managed_title, managed_body, managed_tags_json, managed_properties_json, created_at, updated_at) VALUES (?, ?, 'text/markdown', 'markdown', 'queued', ?, ?, ?, ?, ?, ?)", [task.pageId, filename, page.title, page.body, JSON.stringify(page.tags), JSON.stringify(page.properties), checkedAt, checkedAt]);
+          documentId = Number(document.lastInsertRowid);
+          const version = this.db.run("INSERT INTO document_versions(document_id, version, blob_sha256, status, created_at) VALUES (?, 1, ?, 'queued', ?)", [documentId, markdownHash, checkedAt]);
+          this.db.run("INSERT INTO document_jobs(document_id, version_id, requested_at, available_at) VALUES (?, ?, ?, ?)", [documentId, Number(version.lastInsertRowid), checkedAt, checkedAt]);
+        } else {
+          const managed = managedBefore!;
+          const nextVersion = this.db.query<{ version: number }, [number]>("SELECT max(version) AS version FROM document_versions WHERE document_id = ?").get(documentId)!.version + 1;
+          this.db.run("UPDATE document_versions SET status = 'superseded' WHERE document_id = ? AND status IN ('queued', 'extracting')", [documentId]);
+          const version = this.db.run("INSERT INTO document_versions(document_id, version, blob_sha256, status, created_at) VALUES (?, ?, ?, 'queued', ?)", [documentId, nextVersion, markdownHash, checkedAt]);
+          this.db.run("DELETE FROM document_section_search WHERE document_id = ?", [documentId]);
+          this.db.run("DELETE FROM document_section_chunks WHERE section_id IN (SELECT ds.id FROM document_sections ds JOIN document_versions dv ON dv.id = ds.document_version_id WHERE dv.document_id = ?)", [documentId]);
+          this.db.run("DELETE FROM document_semantic_index WHERE document_id = ?", [documentId]);
+          this.db.run("DELETE FROM document_semantic_queue WHERE document_id = ?", [documentId]);
+          this.db.run("UPDATE documents SET filename = ?, status = 'queued', needs_ocr = 0, ocr_status = 'not_required', needs_review = ?, managed_title = ?, managed_body = ?, managed_tags_json = ?, managed_properties_json = ?, last_error = NULL, updated_at = ? WHERE id = ?", [filename, humanEditedBefore ? 1 : managed.needs_review, humanEditedBefore ? managed.managed_title : page.title, humanEditedBefore ? managed.managed_body : page.body, humanEditedBefore ? managed.managed_tags_json : JSON.stringify(page.tags), humanEditedBefore ? managed.managed_properties_json : JSON.stringify(page.properties), checkedAt, documentId]);
+          this.db.run("INSERT INTO document_jobs(document_id, version_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, ?, 0, 1) ON CONFLICT(document_id) DO UPDATE SET version_id = excluded.version_id, requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = document_jobs.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [documentId, Number(version.lastInsertRowid), checkedAt, checkedAt]);
+        }
+        this.db.run("INSERT INTO web_capture_snapshots(web_capture_id, blob_sha256, final_url, http_status, content_type, title, etag, last_modified, size, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [task.webCaptureId, rawHash, result.finalUrl, result.status, result.contentType, result.title, result.etag, result.lastModified, result.bytes.byteLength, checkedAt]);
+        this.db.run("UPDATE web_captures SET document_id = ?, final_url = ?, status = 'ready', title = ?, content_type = ?, http_status = ?, etag = ?, last_modified = ?, last_error = NULL, fetched_at = ?, last_checked_at = ?, next_refresh_at = ?, updated_at = ? WHERE id = ?", [documentId, result.finalUrl, result.title, result.contentType, result.status, result.etag, result.lastModified, checkedAt, checkedAt, nextRefresh, checkedAt, task.webCaptureId]);
         this.db.run("DELETE FROM web_capture_jobs WHERE web_capture_id = ? AND revision = ?", [task.webCaptureId, task.revision]);
         return true;
       }).immediate();
@@ -1191,9 +1347,12 @@ export class PageStore {
     if (!row) return;
     const attempts = retryable ? row.attempts + 1 : 3;
     const failed = attempts >= 3;
+    const now = new Date();
+    const interval = this.getWebCapture(task.webCaptureId).refreshIntervalSeconds;
+    const nextRefresh = failed && interval !== null ? new Date(now.getTime() + interval * 1000).toISOString() : null;
     this.db.transaction(() => {
-      this.db.run("UPDATE web_capture_jobs SET attempts = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, last_error = ? WHERE web_capture_id = ? AND revision = ?", [attempts, new Date(Date.now() + Math.min(60_000, 1000 * 2 ** attempts)).toISOString(), message.slice(0, 2000), task.webCaptureId, task.revision]);
-      this.db.run("UPDATE web_captures SET status = ?, last_error = ?, updated_at = ? WHERE id = ?", [failed ? "failed" : "queued", message.slice(0, 2000), new Date().toISOString(), task.webCaptureId]);
+      this.db.run("UPDATE web_capture_jobs SET attempts = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, last_error = ? WHERE web_capture_id = ? AND revision = ?", [attempts, new Date(now.getTime() + Math.min(60_000, 1000 * 2 ** attempts)).toISOString(), message.slice(0, 2000), task.webCaptureId, task.revision]);
+      this.db.run("UPDATE web_captures SET status = ?, last_error = ?, next_refresh_at = ?, updated_at = ? WHERE id = ?", [failed ? "failed" : "queued", message.slice(0, 2000), nextRefresh, now.toISOString(), task.webCaptureId]);
     }).immediate();
   }
 
@@ -1216,6 +1375,111 @@ export class PageStore {
       this.db.run("UPDATE web_captures SET status = 'queued', last_error = NULL, updated_at = ? WHERE id = ?", [now, id]);
     }).immediate();
     return this.getWebCapture(id);
+  }
+
+  createResearch(queryValue: string, requestedUrls: string[], maxSources: number): ResearchJob {
+    const query = queryValue.trim();
+    if (!query || query.length > 4000) throw new AppError("invalid_research_query", "research query must contain between 1 and 4000 characters", 400);
+    if (!Number.isSafeInteger(maxSources) || maxSources < 1 || maxSources > 100) throw new AppError("invalid_research_sources", "maxSources must be between 1 and 100", 400);
+    const urls = [...new Set(requestedUrls)].slice(0, maxSources);
+    const now = new Date().toISOString();
+    const id = this.db.transaction(() => {
+      const result = this.db.run("INSERT INTO research_jobs(query, requested_urls_json, max_sources, status, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?)", [query, JSON.stringify(urls), maxSources, now, now]);
+      const researchId = Number(result.lastInsertRowid);
+      this.db.run("INSERT INTO research_queue(research_id, requested_at, available_at) VALUES (?, ?, ?)", [researchId, now, now]);
+      return researchId;
+    }).immediate();
+    return this.getResearch(id);
+  }
+
+  getResearch(id: number): ResearchJob {
+    if (!Number.isSafeInteger(id) || id < 1) throw new AppError("invalid_research_id", "research ID is invalid", 400);
+    const row = this.db.query<ResearchRow, [number]>("SELECT * FROM research_jobs WHERE id = ?").get(id);
+    if (!row) throw new AppError("research_not_found", "research job not found", 404);
+    return hydrateResearch(row);
+  }
+
+  listResearch(): ResearchJob[] {
+    return this.db.query<ResearchRow, []>("SELECT * FROM research_jobs ORDER BY updated_at DESC, id DESC").all().map(hydrateResearch);
+  }
+
+  researchSources(id: number): ResearchSource[] {
+    this.getResearch(id);
+    return this.db.query<{ web_capture_id: number; url: string; status: WebCaptureStatus; document_id: number | null; title: string | null }, [number]>("SELECT rs.web_capture_id, rs.url, wc.status, wc.document_id, wc.title FROM research_sources rs JOIN web_captures wc ON wc.id = rs.web_capture_id WHERE rs.research_id = ? ORDER BY rs.web_capture_id").all(id).map((row) => ({ webCaptureId: row.web_capture_id, url: row.url, status: row.status, documentId: row.document_id, title: row.title }));
+  }
+
+  claimResearchTask(owner: string, leaseMilliseconds = 10 * 60_000): ResearchTask | null {
+    const now = new Date();
+    return this.db.transaction(() => {
+      const row = this.db.query<{ research_id: number; revision: number }, [string, string]>("SELECT research_id, revision FROM research_queue WHERE attempts < 3 AND available_at <= ? AND (lease_until IS NULL OR lease_until < ?) ORDER BY requested_at, research_id LIMIT 1").get(now.toISOString(), now.toISOString());
+      if (!row) return null;
+      this.db.run("UPDATE research_queue SET lease_owner = ?, lease_until = ? WHERE research_id = ? AND revision = ?", [owner, new Date(now.getTime() + leaseMilliseconds).toISOString(), row.research_id, row.revision]);
+      this.db.run("UPDATE research_jobs SET status = 'researching', updated_at = ? WHERE id = ?", [now.toISOString(), row.research_id]);
+      return { researchId: row.research_id, revision: row.revision, owner, job: this.getResearch(row.research_id) };
+    }).immediate();
+  }
+
+  renewResearchLease(task: ResearchTask, leaseMilliseconds = 10 * 60_000): boolean {
+    return this.db.run("UPDATE research_queue SET lease_until = ? WHERE research_id = ? AND revision = ? AND lease_owner = ?", [new Date(Date.now() + leaseMilliseconds).toISOString(), task.researchId, task.revision, task.owner]).changes === 1;
+  }
+
+  addResearchSources(task: ResearchTask, urls: string[]): ResearchSource[] {
+    const lease = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM research_queue WHERE research_id = ?").get(task.researchId);
+    if (!lease || lease.revision !== task.revision || lease.lease_owner !== task.owner) return this.researchSources(task.researchId);
+    for (const url of [...new Set(urls)].slice(0, task.job.maxSources)) {
+      let capture = this.webCaptureByUrl(url);
+      if (!capture) capture = this.createWebCapture(url, "web");
+      else if (capture.status === "failed" || capture.status === "cancelled") capture = this.retryWebCapture(capture.id);
+      this.db.run("INSERT OR IGNORE INTO research_sources(research_id, web_capture_id, url) VALUES (?, ?, ?)", [task.researchId, capture.id, url]);
+    }
+    return this.researchSources(task.researchId);
+  }
+
+  delayResearchTask(task: ResearchTask, milliseconds = 1000): void {
+    this.db.run("UPDATE research_queue SET available_at = ?, lease_owner = NULL, lease_until = NULL WHERE research_id = ? AND revision = ? AND lease_owner = ?", [new Date(Date.now() + milliseconds).toISOString(), task.researchId, task.revision, task.owner]);
+  }
+
+  completeResearchTask(task: ResearchTask, result: unknown): void {
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      const lease = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM research_queue WHERE research_id = ?").get(task.researchId);
+      if (!lease || lease.revision !== task.revision || lease.lease_owner !== task.owner) return;
+      this.db.run("UPDATE research_jobs SET status = 'ready', result_json = ?, last_error = NULL, completed_at = ?, updated_at = ? WHERE id = ?", [JSON.stringify(result), now, now, task.researchId]);
+      this.db.run("DELETE FROM research_queue WHERE research_id = ? AND revision = ?", [task.researchId, task.revision]);
+    }).immediate();
+  }
+
+  failResearchTask(task: ResearchTask, message: string, retryable = true): void {
+    const row = this.db.query<{ attempts: number }, [number, number, string]>("SELECT attempts FROM research_queue WHERE research_id = ? AND revision = ? AND lease_owner = ?").get(task.researchId, task.revision, task.owner);
+    if (!row) return;
+    const attempts = retryable ? row.attempts + 1 : 3;
+    const failed = attempts >= 3;
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.run("UPDATE research_queue SET attempts = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, last_error = ? WHERE research_id = ? AND revision = ?", [attempts, new Date(Date.now() + Math.min(60_000, 1000 * 2 ** attempts)).toISOString(), message.slice(0, 2000), task.researchId, task.revision]);
+      this.db.run("UPDATE research_jobs SET status = ?, last_error = ?, updated_at = ? WHERE id = ?", [failed ? "failed" : "queued", message.slice(0, 2000), now, task.researchId]);
+    }).immediate();
+  }
+
+  cancelResearch(id: number): ResearchJob {
+    const job = this.getResearch(id);
+    if (job.status !== "queued" && job.status !== "researching") throw new AppError("research_not_running", "research job is not queued or running", 409);
+    this.db.transaction(() => {
+      this.db.run("DELETE FROM research_queue WHERE research_id = ?", [id]);
+      this.db.run("UPDATE research_jobs SET status = 'cancelled', updated_at = ? WHERE id = ?", [new Date().toISOString(), id]);
+    }).immediate();
+    return this.getResearch(id);
+  }
+
+  retryResearch(id: number): ResearchJob {
+    const job = this.getResearch(id);
+    if (job.status !== "failed" && job.status !== "cancelled") throw new AppError("research_not_retryable", "only failed or cancelled research can be retried", 409);
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.run("INSERT INTO research_queue(research_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, 0, 1) ON CONFLICT(research_id) DO UPDATE SET requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = research_queue.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [id, now, now]);
+      this.db.run("UPDATE research_jobs SET status = 'queued', result_json = NULL, last_error = NULL, completed_at = NULL, updated_at = ? WHERE id = ?", [now, id]);
+    }).immediate();
+    return this.getResearch(id);
   }
 
   createDocument(filenameValue: string, mimeTypeValue: string, format: DocumentFormat, bytes: Uint8Array, source: ChangeSource, maxBytes: number): DocumentRecord {
@@ -1784,8 +2048,16 @@ function webCapturePageTitle(url: string): string {
   return `Web capture: ${parsed.hostname}${suffix}`.slice(0, 200);
 }
 
+function hydrateResearch(row: ResearchRow): ResearchJob {
+  return { id: row.id, query: row.query, requestedUrls: JSON.parse(row.requested_urls_json) as string[], maxSources: row.max_sources, status: row.status, result: row.result_json ? JSON.parse(row.result_json) : null, lastError: row.last_error, createdAt: row.created_at, updatedAt: row.updated_at, completedAt: row.completed_at };
+}
+
+function hydrateWebSnapshot(row: WebSnapshotRow): WebCaptureSnapshot {
+  return { id: row.id, webCaptureId: row.web_capture_id, blobSha256: row.blob_sha256, finalUrl: row.final_url, httpStatus: row.http_status, contentType: row.content_type, title: row.title, etag: row.etag, lastModified: row.last_modified, size: row.size, fetchedAt: row.fetched_at };
+}
+
 function hydrateWebCapture(row: WebCaptureRow): WebCapture {
-  return { id: row.id, pageId: row.page_id, documentId: row.document_id, url: row.url, finalUrl: row.final_url, status: row.status, title: row.title, contentType: row.content_type, httpStatus: row.http_status, lastError: row.last_error, fetchedAt: row.fetched_at, createdAt: row.created_at, updatedAt: row.updated_at };
+  return { id: row.id, pageId: row.page_id, documentId: row.document_id, url: row.url, finalUrl: row.final_url, status: row.status, title: row.title, contentType: row.content_type, httpStatus: row.http_status, etag: row.etag, lastModified: row.last_modified, lastError: row.last_error, fetchedAt: row.fetched_at, lastCheckedAt: row.last_checked_at, refreshIntervalSeconds: row.refresh_interval_seconds, nextRefreshAt: row.next_refresh_at, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
 function documentSearchClauses(filters: DocumentSearchFilters, tags: string[], properties: PageProperties, status: PageStatus | "all"): { clauses: string[]; bindings: Array<string | number> } {
@@ -1795,6 +2067,7 @@ function documentSearchClauses(filters: DocumentSearchFilters, tags: string[], p
   for (const tag of tags) { clauses.push("EXISTS (SELECT 1 FROM page_tags filter_tag WHERE filter_tag.page_id = p.id AND filter_tag.tag = ? COLLATE NOCASE)"); bindings.push(tag); }
   for (const [key, value] of Object.entries(properties)) { clauses.push("EXISTS (SELECT 1 FROM page_properties filter_property WHERE filter_property.page_id = p.id AND filter_property.key = ? COLLATE NOCASE AND filter_property.value_json = ?)"); bindings.push(key, JSON.stringify(value)); }
   if (filters.documentId !== undefined) { clauses.push("d.id = ?"); bindings.push(filters.documentId); }
+  if (filters.documentIds?.length) { clauses.push(`d.id IN (${filters.documentIds.map(() => "?").join(",")})`); bindings.push(...filters.documentIds); }
   if (filters.format !== undefined) { clauses.push("d.format = ?"); bindings.push(filters.format); }
   if (filters.version !== undefined) { clauses.push("dv.version = ?"); bindings.push(filters.version); }
   if (filters.ocrStatus !== undefined) { clauses.push("d.ocr_status = ?"); bindings.push(filters.ocrStatus); }

@@ -8,6 +8,7 @@ import type { PageStore, WebCaptureTask } from "./database.ts";
 import { AppError } from "./domain.ts";
 
 export interface FetchedWebPage {
+  kind: "content";
   requestedUrl: string;
   finalUrl: string;
   status: number;
@@ -15,7 +16,21 @@ export interface FetchedWebPage {
   bytes: Uint8Array;
   title: string;
   markdown: string;
+  etag: string | null;
+  lastModified: string | null;
 }
+
+export interface NotModifiedWebPage {
+  kind: "not_modified";
+  requestedUrl: string;
+  finalUrl: string;
+  status: 304;
+  etag: string | null;
+  lastModified: string | null;
+}
+
+export type WebFetchResult = FetchedWebPage | NotModifiedWebPage;
+export interface WebFetchConditions { finalUrl: string | null; etag: string | null; lastModified: string | null }
 
 export function normalizeWebUrl(value: string): string {
   if (!value.trim() || value.length > 4096) throw new AppError("invalid_web_url", "URL must contain between 1 and 4096 characters", 400);
@@ -74,7 +89,7 @@ function readResponse(response: IncomingMessage, maximum: number): Promise<Uint8
   });
 }
 
-async function requestOnce(url: URL, config: WebCaptureConfig): Promise<{ response: IncomingMessage; bytes: Uint8Array }> {
+async function requestOnce(url: URL, config: WebCaptureConfig, conditions: WebFetchConditions | null): Promise<{ response: IncomingMessage; bytes: Uint8Array }> {
   const hostname = url.hostname.startsWith("[") ? url.hostname.slice(1, -1) : url.hostname;
   const target = await resolvePublicAddress(hostname);
   return new Promise((resolve, reject) => {
@@ -87,7 +102,7 @@ async function requestOnce(url: URL, config: WebCaptureConfig): Promise<{ respon
       path: `${url.pathname}${url.search}`,
       method: "GET",
       servername: url.protocol === "https:" ? hostname : undefined,
-      headers: { Host: url.host, "User-Agent": config.userAgent, Accept: "text/html,application/xhtml+xml,text/plain,text/markdown;q=0.9", "Accept-Encoding": "identity" },
+      headers: { Host: url.host, "User-Agent": config.userAgent, Accept: "text/html,application/xhtml+xml,text/plain,text/markdown;q=0.9", "Accept-Encoding": "identity", ...(conditions?.etag ? { "If-None-Match": conditions.etag } : {}), ...(conditions?.lastModified ? { "If-Modified-Since": conditions.lastModified } : {}) },
     }, async (response) => {
       if ([301, 302, 303, 307, 308].includes(response.statusCode ?? 0) && response.headers.location) { clearTimeout(timer); response.resume(); resolve({ response, bytes: new Uint8Array() }); return; }
       try { resolve({ response, bytes: await readResponse(response, config.maxResponseBytes) }); }
@@ -100,11 +115,12 @@ async function requestOnce(url: URL, config: WebCaptureConfig): Promise<{ respon
   });
 }
 
-export async function fetchPublicWebPage(value: string, config: WebCaptureConfig): Promise<FetchedWebPage> {
+export async function fetchPublicWebPage(value: string, config: WebCaptureConfig, conditions: WebFetchConditions | null = null): Promise<WebFetchResult> {
   const requestedUrl = normalizeWebUrl(value);
   let current = new URL(requestedUrl);
   for (let redirects = 0; ; redirects += 1) {
-    const { response, bytes } = await requestOnce(current, config);
+    const sendConditions = conditions?.finalUrl === current.toString() ? conditions : null;
+    const { response, bytes } = await requestOnce(current, config, sendConditions);
     const status = response.statusCode ?? 0;
     const location = response.headers.location;
     if ([301, 302, 303, 307, 308].includes(status) && location) {
@@ -112,11 +128,14 @@ export async function fetchPublicWebPage(value: string, config: WebCaptureConfig
       current = new URL(normalizeWebUrl(new URL(location, current).toString()));
       continue;
     }
+    const etag = safeValidator(response.headers.etag);
+    const lastModified = safeValidator(response.headers["last-modified"]);
+    if (status === 304) return { kind: "not_modified", requestedUrl, finalUrl: current.toString(), status, etag: etag ?? conditions?.etag ?? null, lastModified: lastModified ?? conditions?.lastModified ?? null };
     if (status < 200 || status >= 300) throw new AppError("web_fetch_failed", `remote server returned HTTP ${status}`, status === 408 || status === 429 || status >= 500 ? 502 : 422);
     const contentType = String(response.headers["content-type"] ?? "application/octet-stream").split(";", 1)[0]!.trim().toLowerCase();
     if (!["text/html", "application/xhtml+xml", "text/plain", "text/markdown"].includes(contentType)) throw new AppError("unsupported_web_content", `unsupported web content type '${contentType}'`, 415);
     const extracted = extractWebContent(bytes, contentType, current.toString(), config.maxExtractedCharacters);
-    return { requestedUrl, finalUrl: current.toString(), status, contentType, bytes, ...extracted };
+    return { kind: "content", requestedUrl, finalUrl: current.toString(), status, contentType, bytes, ...extracted, etag, lastModified };
   }
 }
 
@@ -146,6 +165,11 @@ export function extractWebContent(bytes: Uint8Array, contentType: string, source
   return { title, markdown };
 }
 
+function safeValidator(value: string | string[] | undefined): string | null {
+  if (typeof value !== "string" || !value || value.length > 1000 || /[\r\n]/.test(value)) return null;
+  return value;
+}
+
 function cleanText(value: string): string {
   return value.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (_, entity: string) => {
     if (entity[0] === "#") {
@@ -163,11 +187,12 @@ export class WebCaptureWorker {
   constructor(private readonly store: PageStore, private readonly config: WebCaptureConfig, private readonly documentMaxBytes: number) {}
 
   async runOne(): Promise<boolean> {
+    this.store.enqueueDueWebCaptures();
     const task = this.store.claimWebCaptureTask(this.owner);
     if (!task) return false;
     const heartbeat = setInterval(() => this.store.renewWebCaptureLease(task), 10_000);
     try {
-      const result = await fetchPublicWebPage(task.url, this.config);
+      const result = await fetchPublicWebPage(task.url, this.config, { finalUrl: task.finalUrl, etag: task.etag, lastModified: task.lastModified });
       this.store.completeWebCaptureTask(task, result, this.documentMaxBytes);
     } catch (error) {
       this.store.failWebCaptureTask(task, error instanceof Error ? error.message : String(error), !(error instanceof AppError && error.status < 500));

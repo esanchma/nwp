@@ -19,7 +19,7 @@ import { normalizeWebUrl } from "./web.ts";
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024 + 64 * 1024;
 
 export async function createRequestHandler(store: PageStore, config: Config, apiToken: string): Promise<(request: Request) => Promise<Response>> {
-  const handleMcp = await createMcpHandler(store, config.semanticSearch, config.documentRag, config.ragAnswer, config.webCapture);
+  const handleMcp = await createMcpHandler(store, config.semanticSearch, config.documentRag, config.ragAnswer, config.webCapture, config.research);
   const embedder = config.semanticSearch.enabled ? new OllamaEmbedder(config.semanticSearch) : null;
   const allowedHosts = new Set([`${config.host}:${config.port}`, `localhost:${config.port}`, `127.0.0.1:${config.port}`]);
 
@@ -86,8 +86,30 @@ async function apiRoute(request: Request, url: URL, store: PageStore, config: Co
   const webCaptureMatch = /^\/api\/v1\/web-captures\/(\d+)$/.exec(url.pathname);
   const webCaptureCancelMatch = /^\/api\/v1\/web-captures\/(\d+)\/cancel$/.exec(url.pathname);
   const webCaptureRetryMatch = /^\/api\/v1\/web-captures\/(\d+)\/retry$/.exec(url.pathname);
+  const webCaptureRefreshMatch = /^\/api\/v1\/web-captures\/(\d+)\/refresh$/.exec(url.pathname);
+  const webCaptureScheduleMatch = /^\/api\/v1\/web-captures\/(\d+)\/schedule$/.exec(url.pathname);
+  const researchMatch = /^\/api\/v1\/research\/(\d+)$/.exec(url.pathname);
+  const researchCancelMatch = /^\/api\/v1\/research\/(\d+)\/cancel$/.exec(url.pathname);
+  const researchRetryMatch = /^\/api\/v1\/research\/(\d+)\/retry$/.exec(url.pathname);
 
   if (request.method === "GET" && url.pathname === "/api/v1/openapi.json") return openApiResponse();
+  if (request.method === "GET" && url.pathname === "/api/v1/research") return json({ research: store.listResearch() });
+  if (request.method === "POST" && url.pathname === "/api/v1/research") {
+    if (!config.research.enabled || !config.webCapture.enabled || !config.documentRag.enabled || !config.ragAnswer.enabled) throw new AppError("research_disabled", "research, web capture, document ingestion, and cited answers must be enabled", 503);
+    const value = await readJson(request);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new AppError("invalid_research", "request body must be an object", 400);
+    const body = value as Record<string, unknown>;
+    if (Object.keys(body).some((key) => !["query", "urls", "maxSources"].includes(key))) throw new AppError("invalid_research", "request contains unknown fields", 400);
+    if (typeof body.query !== "string") throw new AppError("invalid_research", "query is required", 400);
+    if (body.urls !== undefined && (!Array.isArray(body.urls) || body.urls.some((item) => typeof item !== "string"))) throw new AppError("invalid_research", "urls must be an array of strings", 400);
+    const urls = (body.urls as string[] | undefined ?? []).map(normalizeWebUrl);
+    const maxSources = body.maxSources === undefined ? config.research.defaultMaxSources : body.maxSources;
+    if (typeof maxSources !== "number" || !Number.isSafeInteger(maxSources) || maxSources < 1 || maxSources > config.research.maximumSources) throw new AppError("invalid_research", `maxSources must be between 1 and ${config.research.maximumSources}`, 400);
+    return json(store.createResearch(body.query, urls, maxSources), 202);
+  }
+  if (request.method === "GET" && researchMatch) { const id = Number(researchMatch[1]); return json({ research: store.getResearch(id), sources: store.researchSources(id) }); }
+  if (request.method === "POST" && researchCancelMatch) return json(store.cancelResearch(Number(researchCancelMatch[1])));
+  if (request.method === "POST" && researchRetryMatch) return json(store.retryResearch(Number(researchRetryMatch[1])));
   if (request.method === "GET" && url.pathname === "/api/v1/web-captures") return json({ captures: store.listWebCaptures() });
   if (request.method === "POST" && url.pathname === "/api/v1/web-captures") {
     if (!config.webCapture.enabled || !config.documentRag.enabled) throw new AppError("web_capture_disabled", "web capture and document ingestion must be enabled", 503);
@@ -101,6 +123,14 @@ async function apiRoute(request: Request, url: URL, store: PageStore, config: Co
   if (request.method === "GET" && webCaptureMatch) { const id = Number(webCaptureMatch[1]); return json({ capture: store.getWebCapture(id), snapshots: store.listWebCaptureSnapshots(id) }); }
   if (request.method === "POST" && webCaptureCancelMatch) return json(store.cancelWebCapture(Number(webCaptureCancelMatch[1])));
   if (request.method === "POST" && webCaptureRetryMatch) return json(store.retryWebCapture(Number(webCaptureRetryMatch[1])));
+  if (request.method === "POST" && webCaptureRefreshMatch) return json(store.refreshWebCapture(Number(webCaptureRefreshMatch[1])));
+  if (request.method === "PUT" && webCaptureScheduleMatch) {
+    const value = await readJson(request);
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => key !== "refreshIntervalSeconds")) throw new AppError("invalid_refresh_schedule", "request must contain only refreshIntervalSeconds", 400);
+    const interval = (value as Record<string, unknown>).refreshIntervalSeconds;
+    if (interval !== null && typeof interval !== "number") throw new AppError("invalid_refresh_schedule", "refreshIntervalSeconds must be an integer or null", 400);
+    return json(store.scheduleWebCapture(Number(webCaptureScheduleMatch[1]), interval as number | null));
+  }
   if (request.method === "GET" && url.pathname === "/api/v1/documents/ocr/status") return json(await ocrRuntimeStatus(config.documentRag));
   if (request.method === "GET" && url.pathname === "/api/v1/documents") return json({ documents: store.listDocuments() });
   if (request.method === "POST" && url.pathname === "/api/v1/documents") {
@@ -286,6 +316,35 @@ async function webRoute(request: Request, url: URL, store: PageStore, config: Co
   if (request.method === "GET" && url.pathname === "/api-docs/init.js") return staticAssetResponse(swaggerUiInitializer, "text/javascript; charset=utf-8");
   if (request.method === "GET" && url.pathname === "/openapi.json") return openApiResponse();
   if (request.method === "GET" && url.pathname === "/export/all") return fullExportResponse(store);
+  if (request.method === "GET" && url.pathname === "/research") {
+    const items = store.listResearch().map((job) => `<li><a href="/research/${job.id}">${escapeHtml(job.query)}</a><small>${escapeHtml(job.status)} · ${formatDate(job.updatedAt)}${job.lastError ? ` · ${escapeHtml(job.lastError)}` : ""}</small></li>`).join("");
+    return html(layout("Research", `<h1>Research</h1><p>Provide URLs explicitly, or configure <code>research.search_command</code> for discovery.</p><form method="post" action="/research"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Question or topic<textarea name="query" required></textarea></label><label>Source URLs <small>one per line; optional when discovery is configured</small><textarea name="urls"></textarea></label><label>Maximum sources<input type="number" name="max_sources" min="1" max="${config.research.maximumSources}" value="${config.research.defaultMaxSources}"></label><button type="submit">Queue research</button></form>${items ? `<ul class="page-list">${items}</ul>` : "<p>No research jobs yet.</p>"}`, csrf), 200, headers);
+  }
+  if (request.method === "POST" && url.pathname === "/research") {
+    await verifyCsrf(request);
+    if (!config.research.enabled || !config.webCapture.enabled || !config.documentRag.enabled || !config.ragAnswer.enabled) throw new AppError("research_disabled", "research dependencies are disabled", 503);
+    const form = await request.formData();
+    const urls = String(form.get("urls") ?? "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean).map(normalizeWebUrl);
+    const maxSources = Number(form.get("max_sources") ?? config.research.defaultMaxSources);
+    if (!Number.isSafeInteger(maxSources) || maxSources < 1 || maxSources > config.research.maximumSources) throw new AppError("invalid_research", "maximum sources is invalid", 400);
+    const job = store.createResearch(String(form.get("query") ?? ""), urls, maxSources);
+    return redirect(`/research/${job.id}`);
+  }
+  const researchWebMatch = /^\/research\/(\d+)$/.exec(url.pathname);
+  if (request.method === "GET" && researchWebMatch) {
+    const id = Number(researchWebMatch[1]);
+    const job = store.getResearch(id);
+    const sources = store.researchSources(id).map((source) => `<li><a href="${escapeHtml(source.url)}" rel="noreferrer">${escapeHtml(source.title ?? source.url)}</a><small>${escapeHtml(source.status)}${source.documentId ? ` · document ${source.documentId}` : ""}</small></li>`).join("");
+    const actions = job.status === "queued" || job.status === "researching" ? `<form method="post" action="/research/${id}/cancel"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button class="secondary" type="submit">Cancel</button></form>` : job.status === "failed" || job.status === "cancelled" ? `<form method="post" action="/research/${id}/retry"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button class="secondary" type="submit">Retry</button></form>` : "";
+    return html(layout(`Research ${id}`, `<p><a href="/research">← Research</a></p><h1>${escapeHtml(job.query)}</h1><p>Status: <strong>${escapeHtml(job.status)}</strong></p>${job.lastError ? `<p class="error">${escapeHtml(job.lastError)}</p>` : ""}${actions}<h2>Sources</h2>${sources ? `<ul class="page-list">${sources}</ul>` : "<p>Sources have not been selected yet.</p>"}${researchResultView(job.result)}`, csrf), 200, headers);
+  }
+  const researchActionMatch = /^\/research\/(\d+)\/(cancel|retry)$/.exec(url.pathname);
+  if (request.method === "POST" && researchActionMatch) {
+    await verifyCsrf(request);
+    const id = Number(researchActionMatch[1]);
+    if (researchActionMatch[2] === "cancel") store.cancelResearch(id); else store.retryResearch(id);
+    return redirect(`/research/${id}`);
+  }
   if (request.method === "GET" && url.pathname === "/web-captures") {
     const items = store.listWebCaptures().map((capture) => `<li><a href="/wiki/${encodeURIComponent(store.getById(capture.pageId).alias)}">${escapeHtml(capture.title ?? capture.url)}</a><small>${escapeHtml(capture.status)} · ${escapeHtml(capture.finalUrl ?? capture.url)}${capture.lastError ? ` · ${escapeHtml(capture.lastError)}` : ""}</small></li>`).join("");
     return html(layout("Web captures", `<h1>Web captures</h1><form method="post" action="/web-captures"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Public HTTP(S) URL<input type="url" name="url" required placeholder="https://example.com/article"></label><button type="submit">Queue capture</button></form>${items ? `<ul class="page-list">${items}</ul>` : "<p>No web captures yet.</p>"}`, csrf), 200, headers);
@@ -316,10 +375,18 @@ async function webRoute(request: Request, url: URL, store: PageStore, config: Co
     const document = store.createDocument(file.name, canonicalDocumentMime(format), format, new Uint8Array(await file.arrayBuffer()), "web", config.documentRag.maxFileBytes);
     return redirect(`/wiki/${encodeURIComponent(store.getById(document.pageId).alias)}`);
   }
-  const webCaptureJobMatch = /^\/web-captures\/(\d+)\/(cancel|retry)$/.exec(url.pathname);
+  const webCaptureJobMatch = /^\/web-captures\/(\d+)\/(cancel|retry|refresh)$/.exec(url.pathname);
   if (request.method === "POST" && webCaptureJobMatch) {
     await verifyCsrf(request);
-    const capture = webCaptureJobMatch[2] === "cancel" ? store.cancelWebCapture(Number(webCaptureJobMatch[1])) : store.retryWebCapture(Number(webCaptureJobMatch[1]));
+    const capture = webCaptureJobMatch[2] === "cancel" ? store.cancelWebCapture(Number(webCaptureJobMatch[1])) : webCaptureJobMatch[2] === "retry" ? store.retryWebCapture(Number(webCaptureJobMatch[1])) : store.refreshWebCapture(Number(webCaptureJobMatch[1]));
+    return redirect(`/wiki/${encodeURIComponent(store.getById(capture.pageId).alias)}`);
+  }
+  const webCaptureScheduleWebMatch = /^\/web-captures\/(\d+)\/schedule$/.exec(url.pathname);
+  if (request.method === "POST" && webCaptureScheduleWebMatch) {
+    await verifyCsrf(request);
+    const form = await request.formData();
+    const input = String(form.get("interval") ?? "off");
+    const capture = store.scheduleWebCapture(Number(webCaptureScheduleWebMatch[1]), input === "off" ? null : Number(input));
     return redirect(`/wiki/${encodeURIComponent(store.getById(capture.pageId).alias)}`);
   }
   const documentJobWebMatch = /^\/documents\/(\d+)\/(cancel|retry)$/.exec(url.pathname);
@@ -524,7 +591,7 @@ function pageView(page: Page, store: PageStore, csrf: string): string {
   const properties = Object.entries(page.properties).map(([key, value]) => `<tr><th>${escapeHtml(key)}</th><td><code>${escapeHtml(JSON.stringify(value))}</code></td></tr>`).join("");
   const backlinks = page.backlinks.map((link) => `<li><a href="/wiki/${encodeURIComponent(link.alias)}">${escapeHtml(link.title)}</a></li>`).join("");
   const webCapture = store.webCaptureForPage(page.id);
-  const webCaptureContent = webCapture ? `<aside><h2>Web source</h2><p><a href="${escapeHtml(webCapture.finalUrl ?? webCapture.url)}" rel="noreferrer">${escapeHtml(webCapture.finalUrl ?? webCapture.url)}</a></p><p>Status: <strong>${escapeHtml(webCapture.status)}</strong>${webCapture.fetchedAt ? ` · captured ${formatDate(webCapture.fetchedAt)}` : ""}</p>${webCapture.lastError ? `<p class="error">${escapeHtml(webCapture.lastError)}</p>` : ""}${webCapture.status === "queued" || webCapture.status === "fetching" ? `<form method="post" action="/web-captures/${webCapture.id}/cancel"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button class="secondary" type="submit">Cancel capture</button></form>` : webCapture.status === "failed" || webCapture.status === "cancelled" ? `<form method="post" action="/web-captures/${webCapture.id}/retry"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button class="secondary" type="submit">Retry capture</button></form>` : ""}</aside>` : "";
+  const webCaptureContent = webCapture ? `<aside><h2>Web source</h2><p><a href="${escapeHtml(webCapture.finalUrl ?? webCapture.url)}" rel="noreferrer">${escapeHtml(webCapture.finalUrl ?? webCapture.url)}</a></p><p>Status: <strong>${escapeHtml(webCapture.status)}</strong>${webCapture.fetchedAt ? ` · captured ${formatDate(webCapture.fetchedAt)}` : ""}${webCapture.lastCheckedAt ? ` · checked ${formatDate(webCapture.lastCheckedAt)}` : ""}</p>${webCapture.lastError ? `<p class="error">${escapeHtml(webCapture.lastError)}</p>` : ""}<div class="page-actions">${webCapture.status === "queued" || webCapture.status === "fetching" ? `<form method="post" action="/web-captures/${webCapture.id}/cancel"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button class="secondary" type="submit">Cancel capture</button></form>` : webCapture.status === "failed" || webCapture.status === "cancelled" ? `<form method="post" action="/web-captures/${webCapture.id}/retry"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button class="secondary" type="submit">Retry capture</button></form>` : `<form method="post" action="/web-captures/${webCapture.id}/refresh"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><button class="secondary" type="submit">Refresh now</button></form>`}</div><form method="post" action="/web-captures/${webCapture.id}/schedule"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Automatic refresh<select name="interval"><option value="off"${webCapture.refreshIntervalSeconds === null ? " selected" : ""}>Off</option><option value="3600"${webCapture.refreshIntervalSeconds === 3600 ? " selected" : ""}>Hourly</option><option value="86400"${webCapture.refreshIntervalSeconds === 86400 ? " selected" : ""}>Daily</option><option value="604800"${webCapture.refreshIntervalSeconds === 604800 ? " selected" : ""}>Weekly</option></select></label><button class="secondary" type="submit">Save schedule</button></form></aside>` : "";
   const document = store.documentForPage(page.id);
   const documentContent = document ? documentView(document, store, csrf) : "";
   const attachments = store.listAttachments(page.id);
@@ -608,6 +675,13 @@ function answerForm(csrf: string, question: string, source: string, includeGener
   return `<h1>Answer from your knowledge base</h1><form method="post" action="/answer"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Question<textarea name="question" rows="4" maxlength="4000" required>${escapeHtml(question)}</textarea></label><label>Source<select name="source"><option value="all"${source === "all" ? " selected" : ""}>Pages and documents</option><option value="pages"${source === "pages" ? " selected" : ""}>Pages</option><option value="documents"${source === "documents" ? " selected" : ""}>Documents</option></select></label><label><input type="checkbox" name="include_general_knowledge"${includeGeneralKnowledge ? " checked" : ""}> Include clearly separated general model knowledge</label><button type="submit">Answer</button></form>`;
 }
 
+function researchResultView(result: unknown): string {
+  if (!result || typeof result !== "object") return "";
+  const answer = (result as { answer?: unknown }).answer;
+  if (!answer || typeof answer !== "object" || typeof (answer as { answer?: unknown }).answer !== "string" || !Array.isArray((answer as { citations?: unknown }).citations)) return `<h2>Result</h2><pre>${escapeHtml(JSON.stringify(result, null, 2))}</pre>`;
+  return `<h2>Research synthesis</h2>${answerResultView(answer as AnswerResult)}`;
+}
+
 function answerResultView(result: AnswerResult): string {
   const citations = result.citations.map((citation) => `<li><a href="${escapeHtml(citation.url)}">${escapeHtml(citation.id)} · ${escapeHtml(citation.title)} · ${escapeHtml(citation.locator)}</a><p>${escapeHtml(citation.excerpt)}</p></li>`).join("");
   return `<section class="answer-result"><h2>Document-backed answer</h2>${result.abstained ? "<p class=\"notice\">There was not enough validated evidence to answer.</p>" : `<div class="markdown">${renderMarkdown(result.answer, () => false)}</div>`}${result.generalKnowledge ? `<aside><h2>General model knowledge</h2><p class="notice">This section is not supported by your nwp evidence.</p><div class="markdown">${renderMarkdown(result.generalKnowledge, () => false)}</div></aside>` : ""}<h2>Citations</h2>${citations ? `<ol class="search-results">${citations}</ol>` : "<p>No citations.</p>"}<p><small>Model: ${escapeHtml(result.model)} · retrieval: ${escapeHtml(result.retrievalMode)}</small></p>${result.warning ? `<p class="notice">${escapeHtml(result.warning)}</p>` : ""}</section>`;
@@ -676,7 +750,7 @@ function formPage(form: FormData) {
 }
 
 function layout(title: string, body: string, csrf: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="csrf-token" content="${escapeHtml(csrf)}"><link rel="icon" href="/logo.svg" type="image/svg+xml"><title>${escapeHtml(title)} · nwp</title><style>${CSS}</style></head><body><header class="site-header"><nav><a class="brand" href="/"><img src="/logo.svg" width="34" height="34" alt="">nwp</a><form class="nav-search" action="/search" method="get"><label class="sr-only" for="nav-query">Search pages</label><input id="nav-query" type="search" name="q" placeholder="Search" aria-label="Search pages"></form><a href="/pages">Pages</a><a href="/tree">Tree</a><a href="/tags">Tags</a><a href="/taxonomy">Taxonomy</a><a href="/documents">Documents</a><a href="/web-captures">Web</a><a href="/answer">Answer</a><a href="/trash">Trash</a><a href="/api-docs">API</a><a href="/import">Import</a><a href="/export/all">Export all</a><a class="button" href="/new">New page</a></nav></header><main>${body}</main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="csrf-token" content="${escapeHtml(csrf)}"><link rel="icon" href="/logo.svg" type="image/svg+xml"><title>${escapeHtml(title)} · nwp</title><style>${CSS}</style></head><body><header class="site-header"><nav><a class="brand" href="/"><img src="/logo.svg" width="34" height="34" alt="">nwp</a><form class="nav-search" action="/search" method="get"><label class="sr-only" for="nav-query">Search pages</label><input id="nav-query" type="search" name="q" placeholder="Search" aria-label="Search pages"></form><a href="/pages">Pages</a><a href="/tree">Tree</a><a href="/tags">Tags</a><a href="/taxonomy">Taxonomy</a><a href="/documents">Documents</a><a href="/web-captures">Web</a><a href="/research">Research</a><a href="/answer">Answer</a><a href="/trash">Trash</a><a href="/api-docs">API</a><a href="/import">Import</a><a href="/export/all">Export all</a><a class="button" href="/new">New page</a></nav></header><main>${body}</main></body></html>`;
 }
 
 const CSS = `

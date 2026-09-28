@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { ensureRuntimeFiles, loadConfig, readApiToken, type ConfigOverrides } from "./config.ts";
 import { PageStore } from "./database.ts";
 import { createRequestHandler } from "./server.ts";
-import { loadEmbeddedSqliteVec, SemanticIndexer, semanticIndexConfig } from "./semantic.ts";
+import { loadEmbeddedSqliteVec, OllamaEmbedder, SemanticIndexer, semanticIndexConfig } from "./semantic.ts";
 import { canonicalDocumentMime, documentFormat, DocumentWorker } from "./documents.ts";
 import { WebCaptureWorker } from "./web.ts";
+import { ResearchWorker } from "./research.ts";
 
 const args = process.argv.slice(2);
 
@@ -29,12 +30,13 @@ async function main(argv: string[]): Promise<void> {
   if (command === "tag") return tagCommand(argv.slice(1));
   if (command === "document") return documentCommand(argv.slice(1));
   if (command === "web") return webCommand(argv.slice(1));
+  if (command === "research") return researchCommand(argv.slice(1));
   if (command === "import") return importCommand(argv.slice(1));
   if (command === "export") return exportCommand(argv.slice(1));
   if (command === "worker") return workerCommand(argv.slice(1));
   if (command === "index") return indexCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") return printHelp();
-  if (command === "--version" || command === "-v") return console.log("nwp 0.14.0");
+  if (command === "--version" || command === "-v") return console.log("nwp 0.15.0");
   throw new Error(`unknown command '${command}'. Run 'nwp help'.`);
 }
 
@@ -59,6 +61,7 @@ async function serve(argv: string[]): Promise<void> {
     else if (workerAbort) workerLoops.push(new SemanticIndexer(store, config.semanticSearch).runLoop(workerAbort.signal));
   }
   if (workerAbort && config.webCapture.enabled && config.documentRag.enabled) workerLoops.push(new WebCaptureWorker(store, config.webCapture, config.documentRag.maxFileBytes).runLoop(workerAbort.signal));
+  if (workerAbort && config.research.enabled) workerLoops.push(new ResearchWorker(store, config.research, config.ragAnswer, config.semanticSearch.enabled ? new OllamaEmbedder(config.semanticSearch) : null).runLoop(workerAbort.signal));
   if (workerAbort && config.documentRag.enabled) workerLoops.push(new DocumentWorker(store, config.documentRag).runLoop(workerAbort.signal));
   if (workerLoops.length) console.error("background workers running in server process");
 
@@ -84,6 +87,56 @@ async function serve(argv: string[]): Promise<void> {
   }
 }
 
+async function researchCommand(argv: string[]): Promise<void> {
+  const action = argv[0] ?? "list";
+  const options = parseOptions(argv.slice(1));
+  const config = await loadConfig({ configPath: optionalString(options, "config"), dataDir: optionalString(options, "data-dir") });
+  if (action === "run") {
+    if (!config.research.enabled || !config.webCapture.enabled || !config.documentRag.enabled || !config.ragAnswer.enabled) throw new Error("research, web capture, document ingestion, and cited answers must be enabled");
+    await ensureRuntimeFiles(config);
+    const store = new PageStore(config.dbPath);
+    try {
+      let embedder: OllamaEmbedder | null = null;
+      let semantic: SemanticIndexer | null = null;
+      if (config.semanticSearch.enabled) {
+        const extension = loadEmbeddedSqliteVec(store, config.dataDir);
+        store.configureSemantic(semanticIndexConfig(config.semanticSearch));
+        if (extension.available) { embedder = new OllamaEmbedder(config.semanticSearch); semantic = new SemanticIndexer(store, config.semanticSearch); }
+      }
+      const research = new ResearchWorker(store, config.research, config.ragAnswer, embedder);
+      const web = new WebCaptureWorker(store, config.webCapture, config.documentRag.maxFileBytes);
+      const documents = new DocumentWorker(store, config.documentRag);
+      const idText = positional(options, 0);
+      const targetId = idText === undefined ? null : Number(integerArgument(options, 0, "research run ID must be a positive integer"));
+      let processed = 0;
+      for (let round = 0; round < 100; round += 1) {
+        processed += await research.runUntilIdle();
+        processed += await web.runUntilIdle();
+        processed += await documents.runUntilIdle();
+        if (semantic) processed += await semantic.runUntilIdle();
+        await Bun.sleep(1100);
+        processed += await research.runUntilIdle();
+        const active = targetId === null ? store.listResearch().some((job) => job.status === "queued" || job.status === "researching") : ["queued", "researching"].includes(store.getResearch(targetId).status);
+        if (!active) break;
+      }
+      return printResult({ processed, ...(targetId === null ? { research: store.listResearch() } : { research: store.getResearch(targetId), sources: store.researchSources(targetId) }) }, true);
+    } finally { store.close(); }
+  }
+  const token = optionalString(options, "token") ?? await readApiToken(config);
+  const endpoint = optionalString(options, "endpoint") ?? `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${config.port}`;
+  if (action === "list") return printResult(await apiRequest(endpoint, token, "/api/v1/research", "GET"), true);
+  if (action === "add") {
+    const query = positional(options, 0);
+    if (!query) throw new Error("research add requires a quoted question or topic");
+    return printResult(await apiRequest(endpoint, token, "/api/v1/research", "POST", { query, urls: csvOption(options, "urls"), maxSources: optionalNumber(options, "max-sources") }), true);
+  }
+  if (["get", "cancel", "retry"].includes(action)) {
+    const id = integerArgument(options, 0, `research ${action} requires a research ID`);
+    return printResult(await apiRequest(endpoint, token, `/api/v1/research/${id}${action === "get" ? "" : `/${action}`}`, action === "get" ? "GET" : "POST"), true);
+  }
+  throw new Error("research command must be add, list, get, cancel, retry, or run");
+}
+
 async function webCommand(argv: string[]): Promise<void> {
   const action = argv[0] ?? "list";
   const options = parseOptions(argv.slice(1));
@@ -106,11 +159,18 @@ async function webCommand(argv: string[]): Promise<void> {
     if (!url) throw new Error("web add requires a public HTTP(S) URL");
     return printResult(await apiRequest(endpoint, token, "/api/v1/web-captures", "POST", { url }), true);
   }
-  if (["get", "cancel", "retry"].includes(action)) {
+  if (["get", "cancel", "retry", "refresh"].includes(action)) {
     const id = integerArgument(options, 0, `web ${action} requires a capture ID`);
     return printResult(await apiRequest(endpoint, token, `/api/v1/web-captures/${id}${action === "get" ? "" : `/${action}`}`, action === "get" ? "GET" : "POST"), true);
   }
-  throw new Error("web command must be add, list, get, cancel, retry, or run");
+  if (action === "schedule") {
+    const id = integerArgument(options, 0, "web schedule requires a capture ID");
+    const interval = optionalString(options, "interval");
+    if (interval === undefined) throw new Error("web schedule requires --interval SECONDS or --interval off");
+    const refreshIntervalSeconds = interval === "off" ? null : Number(interval);
+    return printResult(await apiRequest(endpoint, token, `/api/v1/web-captures/${id}/schedule`, "PUT", { refreshIntervalSeconds }), true);
+  }
+  throw new Error("web command must be add, list, get, refresh, schedule, cancel, retry, or run");
 }
 
 async function documentCommand(argv: string[]): Promise<void> {
@@ -177,6 +237,7 @@ async function workerCommand(argv: string[]): Promise<void> {
     else loops.push(new SemanticIndexer(store, config.semanticSearch).runLoop(abort.signal));
   }
   if (config.webCapture.enabled && config.documentRag.enabled) loops.push(new WebCaptureWorker(store, config.webCapture, config.documentRag.maxFileBytes).runLoop(abort.signal));
+  if (config.research.enabled) loops.push(new ResearchWorker(store, config.research, config.ragAnswer, config.semanticSearch.enabled ? new OllamaEmbedder(config.semanticSearch) : null).runLoop(abort.signal));
   if (config.documentRag.enabled) loops.push(new DocumentWorker(store, config.documentRag).runLoop(abort.signal));
   const stop = () => abort.abort();
   process.once("SIGINT", stop);
@@ -625,8 +686,12 @@ Usage:
   nwp document review|cancel|retry ID
   nwp document run [--json]
   nwp web add URL
-  nwp web list|get|cancel|retry [ID]
+  nwp web list|get|refresh|cancel|retry [ID]
+  nwp web schedule ID --interval SECONDS|off
   nwp web run [--json]
+  nwp research add "QUESTION" [--urls URL,URL] [--max-sources N]
+  nwp research list|get|cancel|retry [ID]
+  nwp research run [ID]
   nwp trash list [--limit N] [--cursor CURSOR] [--json]
   nwp trash get|restore|purge ID [--json]
   nwp attachment add PAGE_ID PATH [--name FILENAME] [--json]

@@ -104,6 +104,7 @@ export type SearchSource = "all" | "pages" | "documents";
 export interface DocumentSearchFilters {
   source: SearchSource;
   documentId?: number;
+  documentIds?: number[];
   format?: DocumentFormat;
   version?: number;
   ocrStatus?: OcrStatus;
@@ -255,8 +256,13 @@ export interface WebCapture {
   title: string | null;
   contentType: string | null;
   httpStatus: number | null;
+  etag: string | null;
+  lastModified: string | null;
   lastError: string | null;
   fetchedAt: string | null;
+  lastCheckedAt: string | null;
+  refreshIntervalSeconds: number | null;
+  nextRefreshAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -269,8 +275,33 @@ export interface WebCaptureSnapshot {
   httpStatus: number;
   contentType: string;
   title: string | null;
+  etag: string | null;
+  lastModified: string | null;
   size: number;
   fetchedAt: string;
+}
+
+export type ResearchStatus = "queued" | "researching" | "ready" | "failed" | "cancelled";
+
+export interface ResearchJob {
+  id: number;
+  query: string;
+  requestedUrls: string[];
+  maxSources: number;
+  status: ResearchStatus;
+  result: unknown | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
+export interface ResearchSource {
+  webCaptureId: number;
+  url: string;
+  status: WebCaptureStatus;
+  documentId: number | null;
+  title: string | null;
 }
 
 export interface SemanticStatus {
