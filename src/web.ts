@@ -196,7 +196,9 @@ function capturedWebDocument(url: URL, contentType: string, bytes: Uint8Array, c
   const header = Array.isArray(contentDisposition) ? contentDisposition[0] : contentDisposition;
   const suggested = /filename\*?=(?:UTF-8''|"?)([^";]+)/i.exec(header ?? "")?.[1];
   const fallback = basename(url.pathname) || "web-capture.pdf";
-  const filename = basename(decodeURIComponent(suggested || fallback)).replace(/[^\w.() -]/g, "_").slice(0, 240) || "web-capture.pdf";
+  let decoded = suggested || fallback;
+  try { decoded = decodeURIComponent(decoded); } catch { decoded = fallback; }
+  const filename = basename(decoded).replace(/[^\w.() -]/g, "_").slice(0, 240) || "web-capture.pdf";
   return { filename: filename.toLowerCase().endsWith(".pdf") ? filename : `${filename}.pdf`, mimeType: "application/pdf", format: "pdf" };
 }
 
