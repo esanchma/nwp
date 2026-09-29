@@ -489,7 +489,7 @@ function extractMarkdown(text: string): ExtractedDocument {
     const match = matches[index]!;
     const heading = match[2]!.trim();
     const end = matches[index + 1]?.index ?? text.length;
-    sections.push(section("heading", heading, { label: `Heading: ${heading}`, heading }, text.slice(match.index!, end).trim()));
+    sections.push(section("heading", heading, { label: `Heading: ${heading}`, heading }, text.slice(match.index! + match[0]!.length, end).trim()));
   }
   return finish(matches[0]?.[2]?.trim() ?? null, sections, [], false);
 }

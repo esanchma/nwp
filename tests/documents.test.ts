@@ -29,6 +29,7 @@ describe("document extraction", () => {
     const markdown = await extractDocument("guide.md", "text/markdown", strToU8("# Guide\n\nIntro.\n\n## Install\n\nRun nwp."), config);
     expect(markdown.title).toBe("Guide");
     expect(markdown.sections.map(({ locator }) => locator.label)).toEqual(["Heading: Guide", "Heading: Install"]);
+    expect(markdown.sections.map(({ text }) => text)).toEqual(["Intro.", "Run nwp."]);
     const text = await extractDocument("notes.txt", "text/plain", strToU8("plain notes"), config);
     expect(text.sections[0]).toMatchObject({ kind: "text", text: "plain notes", locator: { label: "Part 1" } });
   });
