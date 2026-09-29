@@ -25,7 +25,7 @@ afterEach(async () => {
 });
 
 function answerConfig(url: string): RagAnswerConfig {
-  return { enabled: true, ollamaUrl: url, generationModel: "test", timeoutSeconds: 10, maxEvidenceItems: 8, maxEvidenceCharacters: 6000, maxPromptCharacters: 50_000, maxAnswerCharacters: 12_000, includeGeneralKnowledge: false };
+  return { enabled: true, ollamaUrl: url, generationModel: "test", timeoutSeconds: 10, maxEvidenceItems: 8, maxEvidenceCharacters: 6000, maxPromptCharacters: 50_000, maxAnswerCharacters: 3000, maxGenerationTokens: 384, includeGeneralKnowledge: false };
 }
 
 describe("durable research", () => {

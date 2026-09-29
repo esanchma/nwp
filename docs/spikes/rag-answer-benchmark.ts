@@ -9,7 +9,7 @@ const root = join(process.cwd(), ".tmp", "rag-answer-benchmark");
 rmSync(root, { recursive: true, force: true });
 mkdirSync(root, { recursive: true });
 const semantic: SemanticSearchConfig = { enabled: true, ollamaUrl: process.env.OLLAMA_URL ?? "http://127.0.0.1:11434", embeddingModel: process.env.EMBEDDING_MODEL ?? "bge-m3", embeddingDimensions: Number(process.env.EMBEDDING_DIMENSIONS ?? 1024), queryPrefix: "", chunkCharacters: 1600, chunkOverlap: 200 };
-const answer: RagAnswerConfig = { enabled: true, ollamaUrl: semantic.ollamaUrl, generationModel: process.env.GENERATION_MODEL ?? "qwen3:8b", timeoutSeconds: 180, maxEvidenceItems: 5, maxEvidenceCharacters: 6000, maxPromptCharacters: 50_000, maxAnswerCharacters: 4000, includeGeneralKnowledge: false };
+const answer: RagAnswerConfig = { enabled: true, ollamaUrl: semantic.ollamaUrl, generationModel: process.env.GENERATION_MODEL ?? "qwen3:8b", timeoutSeconds: 180, maxEvidenceItems: 5, maxEvidenceCharacters: 6000, maxPromptCharacters: 50_000, maxAnswerCharacters: 4000, maxGenerationTokens: 384, includeGeneralKnowledge: false };
 const cases = [
   { title: "Parental leave", body: "Employees receive sixteen weeks of paid parental leave after birth or adoption.", question: "How much paid parental leave is available?", expected: "Parental leave" },
   { title: "Expense reports", body: "Itemized receipts must be submitted within thirty calendar days of the purchase.", question: "When is the deadline for an expense receipt?", expected: "Expense reports" },

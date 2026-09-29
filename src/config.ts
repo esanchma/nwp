@@ -21,6 +21,7 @@ export interface RagAnswerConfig {
   maxEvidenceCharacters: number;
   maxPromptCharacters: number;
   maxAnswerCharacters: number;
+  maxGenerationTokens: number;
   includeGeneralKnowledge: boolean;
 }
 
@@ -146,12 +147,13 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
   const ragAnswer: RagAnswerConfig = {
     enabled: booleanValue(answer.enabled, "rag_answer.enabled", true),
     ollamaUrl: stringValue(answer.ollama_url, "rag_answer.ollama_url", semanticSearch.ollamaUrl),
-    generationModel: stringValue(answer.generation_model, "rag_answer.generation_model", "qwen3:8b"),
-    timeoutSeconds: numberValue(answer.timeout_seconds, "rag_answer.timeout_seconds", 120),
-    maxEvidenceItems: numberValue(answer.max_evidence_items, "rag_answer.max_evidence_items", 8),
-    maxEvidenceCharacters: numberValue(answer.max_evidence_characters, "rag_answer.max_evidence_characters", 6000),
+    generationModel: stringValue(answer.generation_model, "rag_answer.generation_model", "qwen3.5:9b"),
+    timeoutSeconds: numberValue(answer.timeout_seconds, "rag_answer.timeout_seconds", 180),
+    maxEvidenceItems: numberValue(answer.max_evidence_items, "rag_answer.max_evidence_items", 4),
+    maxEvidenceCharacters: numberValue(answer.max_evidence_characters, "rag_answer.max_evidence_characters", 3500),
     maxPromptCharacters: numberValue(answer.max_prompt_characters, "rag_answer.max_prompt_characters", 50_000),
-    maxAnswerCharacters: numberValue(answer.max_answer_characters, "rag_answer.max_answer_characters", 12_000),
+    maxAnswerCharacters: numberValue(answer.max_answer_characters, "rag_answer.max_answer_characters", 3000),
+    maxGenerationTokens: numberValue(answer.max_generation_tokens, "rag_answer.max_generation_tokens", 384),
     includeGeneralKnowledge: booleanValue(answer.include_general_knowledge, "rag_answer.include_general_knowledge", true),
   };
   const web = objectValue(file.web_capture, "web_capture");
@@ -212,7 +214,7 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
   if (!Number.isInteger(semanticSearch.embeddingDimensions) || semanticSearch.embeddingDimensions < 1) throw new Error("semantic_search.embedding_dimensions must be a positive integer");
   if (!Number.isInteger(semanticSearch.chunkCharacters) || semanticSearch.chunkCharacters < 200) throw new Error("semantic_search.chunk_characters must be an integer of at least 200");
   if (!Number.isInteger(semanticSearch.chunkOverlap) || semanticSearch.chunkOverlap < 0 || semanticSearch.chunkOverlap >= semanticSearch.chunkCharacters) throw new Error("semantic_search.chunk_overlap must be smaller than chunk_characters");
-  for (const [name, value] of Object.entries({ timeout_seconds: ragAnswer.timeoutSeconds, max_evidence_items: ragAnswer.maxEvidenceItems, max_evidence_characters: ragAnswer.maxEvidenceCharacters, max_prompt_characters: ragAnswer.maxPromptCharacters, max_answer_characters: ragAnswer.maxAnswerCharacters })) {
+  for (const [name, value] of Object.entries({ timeout_seconds: ragAnswer.timeoutSeconds, max_evidence_items: ragAnswer.maxEvidenceItems, max_evidence_characters: ragAnswer.maxEvidenceCharacters, max_prompt_characters: ragAnswer.maxPromptCharacters, max_answer_characters: ragAnswer.maxAnswerCharacters, max_generation_tokens: ragAnswer.maxGenerationTokens })) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error(`rag_answer.${name} must be a positive integer`);
   }
   if (ragAnswer.maxPromptCharacters < ragAnswer.maxEvidenceCharacters) throw new Error("rag_answer.max_prompt_characters must not be smaller than max_evidence_characters");

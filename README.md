@@ -57,12 +57,13 @@ chunk_overlap = 200
 [rag_answer]
 enabled = true
 ollama_url = "http://127.0.0.1:11434"
-generation_model = "qwen3:8b"
-timeout_seconds = 120
-max_evidence_items = 8
-max_evidence_characters = 6000
+generation_model = "qwen3.5:9b"
+timeout_seconds = 180
+max_evidence_items = 4
+max_evidence_characters = 3500
 max_prompt_characters = 50000
-max_answer_characters = 12000
+max_answer_characters = 3000
+max_generation_tokens = 384 # hard model-work budget, independent of characters
 include_general_knowledge = true
 
 [content_tagging]

@@ -26,7 +26,7 @@ beforeEach(async () => {
     configPath: join(dir, "config.toml"),
     attachmentMaxBytes: null,
     semanticSearch: { enabled: false, ollamaUrl: "http://127.0.0.1:11434", embeddingModel: "bge-m3", embeddingDimensions: 1024, queryPrefix: "", chunkCharacters: 1600, chunkOverlap: 200 },
-    ragAnswer: { enabled: false, ollamaUrl: "http://127.0.0.1:11434", generationModel: "qwen3:8b", timeoutSeconds: 120, maxEvidenceItems: 8, maxEvidenceCharacters: 6000, maxPromptCharacters: 50_000, maxAnswerCharacters: 12_000, includeGeneralKnowledge: true },
+    ragAnswer: { enabled: false, ollamaUrl: "http://127.0.0.1:11434", generationModel: "qwen3:8b", timeoutSeconds: 180, maxEvidenceItems: 8, maxEvidenceCharacters: 6000, maxPromptCharacters: 50_000, maxAnswerCharacters: 3000, maxGenerationTokens: 384, includeGeneralKnowledge: true },
     webCapture: { enabled: true, timeoutSeconds: 30, maxRedirects: 5, maxResponseBytes: 20_000_000, maxExtractedCharacters: 2_000_000, maxAssetCount: 50, maxAssetBytes: 10_000_000, maxTotalAssetBytes: 50_000_000, fetchCommand: "", fetchMode: "trafilatura", fetchTimeoutSeconds: 180, maxFetchOutputBytes: 20_000_000, userAgent: "nwp-test" },
     research: { enabled: true, searchCommand: "", searchTimeoutSeconds: 60, maxSearchOutputBytes: 2_000_000, defaultMaxSources: 5, maximumSources: 20 },
     contentTagging: { enabled: false, ollamaUrl: "http://127.0.0.1:11434", model: "qwen3:8b", timeoutSeconds: 120, maxInputCharacters: 16_000, maxTopics: 3, minimumConfidence: 0.65 },
@@ -63,7 +63,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.21.10" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.21.11" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });
