@@ -978,6 +978,16 @@ export class PageStore {
     return this.listTagDefinitions().find((item) => item.tag === tag)!;
   }
 
+  deleteTagDefinition(tagValue: string, source: ChangeSource): { tag: string; removedFromPages: number } {
+    const tag = this.canonicalizeTags([tagValue])[0]!;
+    const definition = this.db.query<{ tag: string }, [string]>("SELECT tag FROM tag_definitions WHERE tag = ? COLLATE NOCASE").get(tag);
+    if (!definition) throw new AppError("tag_not_found", `tag '${tagValue}' was not found`, 404);
+    const pages = this.pagesForTag(tag);
+    for (const page of pages) this.update(page.id, { tags: page.tags.filter((item) => item !== tag) }, source);
+    this.db.run("DELETE FROM tag_definitions WHERE tag = ? COLLATE NOCASE", [tag]);
+    return { tag, removedFromPages: pages.length };
+  }
+
   create(input: PageInput, source: ChangeSource): Page {
     const parsed = pageInputSchema.parse(input);
     const tags = this.canonicalizeTags(parsed.tags);

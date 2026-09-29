@@ -63,7 +63,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.21.3" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.21.4" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });
@@ -500,6 +500,28 @@ describe("web", () => {
     const imported = await handler(request("/import", { method: "POST", headers: { Cookie: cookie }, body: data }));
     expect(imported.status).toBe(303);
     expect(store.getByAlias("web-import").body).toBe("Imported body");
+  });
+
+  test("manages automatic tags from page and taxonomy forms", async () => {
+    const page = store.create({ title: "Tag controls", body: "", tags: ["topic:temporary", "source:web"] }, "web");
+    const view = await handler(request(`/wiki/${page.alias}`));
+    const cookie = view.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const csrf = /nwp_csrf=([^;]+)/.exec(cookie)![1]!;
+    const body = await view.text();
+    expect(body).toContain("Reclassify topics");
+    expect(body).toContain(`/wiki/${page.alias}/tags/remove`);
+
+    const removed = await handler(request(`/wiki/${page.alias}/tags/remove`, { method: "POST", headers: { Cookie: cookie }, body: new URLSearchParams({ csrf, tag: "topic:temporary" }) }));
+    expect(removed.status).toBe(303);
+    expect(store.getById(page.id).tags).toEqual(["source:web"]);
+
+    const taxonomy = await handler(request("/taxonomy", { headers: { Cookie: cookie } }));
+    expect(await taxonomy.text()).toContain("Reclassify all pages");
+    const deleted = await handler(request("/taxonomy/tags/topic%3Atemporary/delete", { method: "POST", headers: { Cookie: cookie }, body: new URLSearchParams({ csrf }) }));
+    expect(deleted.status).toBe(303);
+    expect(store.listTagDefinitions().some((tag) => tag.tag === "topic:temporary")).toBe(false);
+    expect((await handler(request(`/wiki/${page.alias}/reclassify`, { method: "POST", headers: { Cookie: cookie }, body: new URLSearchParams({ csrf }) }))).status).toBe(303);
+    expect((await handler(request("/taxonomy/reclassify", { method: "POST", headers: { Cookie: cookie }, body: new URLSearchParams({ csrf }) }))).status).toBe(303);
   });
 
   test("requires CSRF for form writes", async () => {

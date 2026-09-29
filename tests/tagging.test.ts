@@ -75,7 +75,7 @@ ${JSON.stringify({ topics: [
   test("restores an applicable orphan taxonomy topic through reconciliation", async () => {
     responses = [
       JSON.stringify({ topics: [] }),
-      JSON.stringify({ topics: [{ tag: "topic:kubernetes", displayName: "Kubernetes", confidence: 0.99 }] }),
+      JSON.stringify({ topics: [] }),
     ];
     const page = await capturedArticle("# Kubernetes operations\n\nA practical guide to Kubernetes pods, deployments, and cluster orchestration.");
     await new ContentTagWorker(store, config()).runUntilIdle();
