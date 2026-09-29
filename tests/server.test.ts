@@ -63,7 +63,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.21.9" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.21.10" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });
@@ -155,6 +155,11 @@ describe("HTTP API", () => {
     expect(content).toContain('>Captured</a>');
     expect(content).toContain('<h2>Captured</h2>');
     expect(content).not.toContain('Heading: Captured');
+    const wiki = await (await handler(request(`/wiki/${store.getById(readyCapture.pageId).alias}`))).text();
+    expect(wiki).toContain('class="wiki-layout"');
+    expect(wiki).toContain('class="embedded-document"');
+    expect(wiki).toContain('id="document-section-0"');
+    expect(wiki).toContain('href="#document-section-0"');
     const portableExport = await handler(request(`/web-captures/${capture.id}/export`));
     expect(portableExport.status).toBe(200);
     expect((await portableExport.arrayBuffer()).byteLength).toBeGreaterThan(0);
