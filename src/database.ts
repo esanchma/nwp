@@ -1836,7 +1836,7 @@ export class PageStore {
     }).immediate();
   }
 
-  claimContentTagTask(owner: string, leaseMilliseconds = 10 * 60_000): ContentTagTask | null {
+  claimContentTagTask(owner: string, leaseMilliseconds = 2 * 60_000): ContentTagTask | null {
     const now = new Date();
     const claim = this.db.transaction(() => {
       const row = this.db.query<{ document_id: number; version_id: number; page_id: number; title: string; revision: number }, [string, string]>(`SELECT q.document_id, q.version_id, d.page_id, p.title, q.revision
@@ -1850,7 +1850,7 @@ export class PageStore {
     return claim ? { documentId: claim.document_id, versionId: claim.version_id, pageId: claim.page_id, revision: claim.revision, owner, title: claim.title, sections: this.documentSections(claim.document_id, claim.version_id) } : null;
   }
 
-  renewContentTagLease(task: ContentTagTask, leaseMilliseconds = 10 * 60_000): boolean {
+  renewContentTagLease(task: ContentTagTask, leaseMilliseconds = 2 * 60_000): boolean {
     return this.db.run("UPDATE content_tag_queue SET lease_until = ? WHERE document_id = ? AND version_id = ? AND revision = ? AND lease_owner = ?", [new Date(Date.now() + leaseMilliseconds).toISOString(), task.documentId, task.versionId, task.revision, task.owner]).changes === 1;
   }
 
