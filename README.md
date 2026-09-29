@@ -454,11 +454,13 @@ Manage the vocabulary at `/taxonomy`, through REST, CLI, or MCP. Existing unclas
 
 ## Automatic content topics
 
-After a document version is extracted, nwp queues topic classification. The classifier sends bounded section text to the configured local Ollama model and returns at most `content_tagging.max_topics` canonical topic tags above `minimum_confidence`. It first uses existing topic definitions and aliases. It can create a new `topic:` definition only when the vocabulary does not fit.
+After a document version is extracted, nwp queues topic classification. The primary classifier sends bounded section text to the configured local Ollama model and returns at most `content_tagging.max_topics` canonical topic tags above `minimum_confidence`. It first uses existing topic definitions and aliases. It can create a new `topic:` definition only when the vocabulary does not fit.
+
+A second reconciliation pass explicitly revalidates applicable existing topic tags: previously generated tags, topics proposed by the primary pass, and unused taxonomy topics. It may retain an existing broad tag only when the current document supports it; it cannot reintroduce a tag the user has suppressed, invent a new tag, or exceed the configured topic limit. This prevents useful canonical taxonomy entries from becoming stranded merely because the primary pass chose overly narrow terms.
 
 The queue is leased, retryable, and separate from successful document ingestion. Ollama failures never fail a capture or import. nwp records generated assignments in `page_generated_tags`; page tags remain the rendered and searchable union of operational, human, and generated tags. Recapture replaces only generated assignments. If you remove a generated tag during a normal page edit, nwp suppresses that tag for the page until you add it again.
 
-Use `nwp tag status` to inspect the queue, `nwp tag run` to process pending work, and `nwp tag classify all` to backfill ready document-backed pages. The built-in vocabulary includes `topic:artificial-intelligence` and `topic:kubernetes`.
+Use `nwp tag status` to inspect the queue, `nwp tag run` to process pending work, and `nwp tag classify all` to backfill ready document-backed pages. `nwp tag classify PAGE_ID` takes a page ID, not a document ID. The built-in vocabulary includes `topic:artificial-intelligence` and `topic:kubernetes`.
 
 ## Development
 

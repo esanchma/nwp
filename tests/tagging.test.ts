@@ -68,6 +68,20 @@ ${JSON.stringify({ topics: [
     const messages = requests[0]!.messages as Array<{ role: string; content: string }>;
     expect(messages[0]!.content).toContain("untrusted document content");
     expect(messages[1]!.content).toContain("IGNORE ALL PREVIOUS INSTRUCTIONS");
+    const reconciliation = requests[1]!.messages as Array<{ role: string; content: string }>;
+    expect(reconciliation[0]!.content).toContain("Revalidate existing topic tags");
+  });
+
+  test("restores an applicable orphan taxonomy topic through reconciliation", async () => {
+    responses = [
+      JSON.stringify({ topics: [] }),
+      JSON.stringify({ topics: [{ tag: "topic:kubernetes", displayName: "Kubernetes", confidence: 0.99 }] }),
+    ];
+    const page = await capturedArticle("# Kubernetes operations\n\nA practical guide to Kubernetes pods, deployments, and cluster orchestration.");
+    await new ContentTagWorker(store, config()).runUntilIdle();
+    expect(store.getById(page.id).tags).toContain("topic:kubernetes");
+    expect(requests).toHaveLength(2);
+    expect((requests[1]!.messages as Array<{ role: string; content: string }>)[1]!.content).toContain("topic:kubernetes");
   });
 
   test("does not restore a generated topic removed by the user", async () => {

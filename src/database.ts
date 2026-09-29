@@ -720,7 +720,7 @@ export interface DocumentTask { documentId: number; versionId: number; revision:
 export interface WebCaptureTask { webCaptureId: number; pageId: number; url: string; finalUrl: string | null; etag: string | null; lastModified: string | null; revision: number; owner: string }
 export interface ResearchTask { researchId: number; revision: number; owner: string; job: ResearchJob }
 export interface ContentTopic { tag: string; displayName: string; confidence: number }
-export interface ContentTagTask { documentId: number; versionId: number; pageId: number; revision: number; owner: string; title: string; sections: DocumentSection[] }
+export interface ContentTagTask { documentId: number; versionId: number; pageId: number; revision: number; owner: string; title: string; sections: DocumentSection[]; previousGeneratedTags: string[] }
 export interface SemanticNeighbor { pageId: number; chunkId: number; content: string; distance: number }
 export interface DocumentSemanticNeighbor extends DocumentSearchResult { chunkId: number; content: string; distance: number }
 
@@ -1847,7 +1847,16 @@ export class PageStore {
       this.db.run("UPDATE content_tag_queue SET lease_owner = ?, lease_until = ? WHERE document_id = ? AND revision = ?", [owner, new Date(now.getTime() + leaseMilliseconds).toISOString(), row.document_id, row.revision]);
       return row;
     }).immediate();
-    return claim ? { documentId: claim.document_id, versionId: claim.version_id, pageId: claim.page_id, revision: claim.revision, owner, title: claim.title, sections: this.documentSections(claim.document_id, claim.version_id) } : null;
+    return claim ? {
+      documentId: claim.document_id,
+      versionId: claim.version_id,
+      pageId: claim.page_id,
+      revision: claim.revision,
+      owner,
+      title: claim.title,
+      sections: this.documentSections(claim.document_id, claim.version_id),
+      previousGeneratedTags: this.db.query<{ tag: string }, [number]>("SELECT tag FROM page_generated_tags WHERE page_id = ? ORDER BY tag COLLATE NOCASE").all(claim.page_id).map(({ tag }) => tag),
+    } : null;
   }
 
   renewContentTagLease(task: ContentTagTask, leaseMilliseconds = 2 * 60_000): boolean {
