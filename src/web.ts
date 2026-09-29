@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { basename, extname } from "node:path";
 import type { WebCaptureConfig } from "./config.ts";
 import type { PageStore, WebCaptureTask } from "./database.ts";
-import { AppError } from "./domain.ts";
+import { AppError, type DocumentFormat } from "./domain.ts";
 
 export interface FetchedWebAsset {
   ordinal: number;
@@ -26,6 +26,12 @@ export interface WebAssetReference {
   marker: string;
 }
 
+export interface WebCapturedDocument {
+  filename: string;
+  mimeType: string;
+  format: DocumentFormat;
+}
+
 export interface FetchedWebPage {
   kind: "content";
   requestedUrl: string;
@@ -36,6 +42,7 @@ export interface FetchedWebPage {
   title: string;
   markdown: string;
   assets: FetchedWebAsset[];
+  document?: WebCapturedDocument;
   etag: string | null;
   lastModified: string | null;
 }
@@ -155,10 +162,48 @@ export async function fetchPublicWebPage(value: string, config: WebCaptureConfig
     if (status < 200 || status >= 300) throw new AppError("web_fetch_failed", `remote server returned HTTP ${status}`, status === 408 || status === 429 || status >= 500 ? 502 : 422);
     const contentType = String(response.headers["content-type"] ?? "application/octet-stream").split(";", 1)[0]!.trim().toLowerCase();
     if (!["text/html", "application/xhtml+xml", "text/plain", "text/markdown"].includes(contentType)) throw new AppError("unsupported_web_content", `unsupported web content type '${contentType}'`, 415);
+    const document = capturedWebDocument(current, contentType, bytes, response.headers["content-disposition"]);
+    if (document) return { kind: "content", requestedUrl, finalUrl: current.toString(), status, contentType, bytes, title: basename(document.filename, extname(document.filename)), markdown: "", assets: [], document, etag, lastModified };
+    if (!["text/html", "application/xhtml+xml", "text/plain", "text/markdown"].includes(contentType)) throw new AppError("unsupported_web_content", `unsupported web content type '${contentType}'`, 415);
     const extracted = extractWebContent(bytes, contentType, current.toString(), config.maxExtractedCharacters);
     const captured = await captureWebAssets(extracted.markdown, extracted.assets, config);
     return { kind: "content", requestedUrl, finalUrl: current.toString(), status, contentType, bytes, title: extracted.title, markdown: captured.markdown, assets: captured.assets, etag, lastModified };
   }
+}
+
+async function fetchPublicWebDocument(value: string, config: WebCaptureConfig): Promise<FetchedWebPage> {
+  const requestedUrl = normalizeWebUrl(value);
+  let current = new URL(requestedUrl);
+  for (let redirects = 0; ; redirects += 1) {
+    const { response, bytes } = await requestOnce(current, config, null, config.maxResponseBytes, "application/pdf");
+    const status = response.statusCode ?? 0;
+    const location = response.headers.location;
+    if ([301, 302, 303, 307, 308].includes(status) && location) {
+      if (redirects >= config.maxRedirects) throw new AppError("too_many_web_redirects", "web capture exceeded the redirect guard", 422);
+      current = new URL(normalizeWebUrl(new URL(location, current).toString()));
+      continue;
+    }
+    if (status < 200 || status >= 300) throw new AppError("web_fetch_failed", `remote server returned HTTP ${status}`, status === 408 || status === 429 || status >= 500 ? 502 : 422);
+    const contentType = String(response.headers["content-type"] ?? "application/octet-stream").split(";", 1)[0]!.trim().toLowerCase();
+    const document = capturedWebDocument(current, contentType, bytes, response.headers["content-disposition"]);
+    if (!document) throw new AppError("unsupported_web_content", "delegated extraction identified a PDF but the verified response is not a PDF", 415);
+    return { kind: "content", requestedUrl, finalUrl: current.toString(), status, contentType, bytes, title: basename(document.filename, extname(document.filename)), markdown: "", assets: [], document, etag: safeValidator(response.headers.etag), lastModified: safeValidator(response.headers["last-modified"]) };
+  }
+}
+
+function capturedWebDocument(url: URL, contentType: string, bytes: Uint8Array, contentDisposition: string | string[] | undefined): WebCapturedDocument | null {
+  if (contentType !== "application/pdf" || !hasPdfSignature(bytes)) return null;
+  const header = Array.isArray(contentDisposition) ? contentDisposition[0] : contentDisposition;
+  const suggested = /filename\*?=(?:UTF-8''|"?)([^";]+)/i.exec(header ?? "")?.[1];
+  const fallback = basename(url.pathname) || "web-capture.pdf";
+  const filename = basename(decodeURIComponent(suggested || fallback)).replace(/[^\w.() -]/g, "_").slice(0, 240) || "web-capture.pdf";
+  return { filename: filename.toLowerCase().endsWith(".pdf") ? filename : `${filename}.pdf`, mimeType: "application/pdf", format: "pdf" };
+}
+
+function hasPdfSignature(bytes: Uint8Array): boolean {
+  const limit = Math.min(bytes.byteLength - 5, 1024);
+  for (let index = 0; index <= limit; index += 1) if (bytes[index] === 0x25 && bytes[index + 1] === 0x50 && bytes[index + 2] === 0x44 && bytes[index + 3] === 0x46 && bytes[index + 4] === 0x2d) return true;
+  return false;
 }
 
 async function fetchWithWebResearch(value: string, config: WebCaptureConfig): Promise<FetchedWebPage> {
@@ -175,6 +220,8 @@ async function fetchWithWebResearch(value: string, config: WebCaptureConfig): Pr
     const parsed = parseWebResearchOutput(stdout);
     const adapterOutput = new TextEncoder().encode(stdout);
     const title = parsed.metadata.TITLE?.trim().slice(0, 200) || /^#\s+(.+)$/m.exec(parsed.body)?.[1]?.trim().slice(0, 200) || new URL(requestedUrl).hostname;
+    const delegatedContentType = parsed.metadata.CONTENT_TYPE?.split(";", 1)[0]?.trim().toLowerCase() || "";
+    if (delegatedContentType === "application/pdf") return fetchPublicWebDocument(requestedUrl, config);
     if (config.fetchMode === "raw") {
       const contentType = parsed.metadata.CONTENT_TYPE?.split(";", 1)[0]?.trim().toLowerCase() || "text/html";
       const bytes = new TextEncoder().encode(parsed.body);

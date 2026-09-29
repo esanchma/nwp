@@ -92,6 +92,19 @@ else\n  body='# Delegated article\\n\\nDelegated body'\n  extraction="\${mode#--
     expect(store.documentSections(completed.documentId!)[0]!.text).toContain(imageUrl);
   });
 
+  test("persists captured PDFs as PDF documents rather than decoded Markdown", async () => {
+    const capture = store.createWebCapture("https://example.com/report.pdf", "rest");
+    const task = store.claimWebCaptureTask("pdf-owner")!;
+    const pdf = new TextEncoder().encode("%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF");
+    store.completeWebCaptureTask(task, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "application/pdf", bytes: pdf, title: "report", markdown: "", assets: [], document: { filename: "report.pdf", mimeType: "application/pdf", format: "pdf" }, etag: null, lastModified: null }, documentConfig.maxFileBytes);
+    const completed = store.getWebCapture(capture.id);
+    const document = store.getDocument(completed.documentId!);
+    expect(completed.contentType).toBe("application/pdf");
+    expect(document).toMatchObject({ filename: "report.pdf", mimeType: "application/pdf", format: "pdf", status: "queued" });
+    const version = store.listDocumentVersions(document.id)[0]!;
+    expect(new Uint8Array(await Bun.file(store.attachmentFilePath(version.sha256)).arrayBuffer())).toEqual(pdf);
+  });
+
   test("refreshes conditionally, retains changed versions, and schedules due work", async () => {
     const capture = store.createWebCapture("https://example.com/versioned", "rest");
     const first = store.claimWebCaptureTask("owner-1")!;

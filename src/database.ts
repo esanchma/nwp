@@ -1484,7 +1484,8 @@ export class PageStore {
       return;
     }
     const markdownBytes = new TextEncoder().encode(result.markdown);
-    if (markdownBytes.byteLength > maxDocumentBytes) throw new AppError("document_too_large", `captured Markdown exceeds the technical ${maxDocumentBytes} byte guard`, 413);
+    const documentBytes = result.document ? result.bytes : markdownBytes;
+    if (documentBytes.byteLength > maxDocumentBytes) throw new AppError("document_too_large", `captured document exceeds the technical ${maxDocumentBytes} byte guard`, 413);
     const pageBefore = this.getById(task.pageId);
     const managedBefore = capture.documentId === null ? null : this.db.query<DocumentRow, [number]>("SELECT * FROM documents WHERE id = ?").get(capture.documentId)!;
     const humanEditedBefore = managedBefore !== null && (pageBefore.title !== managedBefore.managed_title || pageBefore.body !== managedBefore.managed_body || JSON.stringify(pageBefore.tags) !== managedBefore.managed_tags_json || JSON.stringify(pageBefore.properties) !== managedBefore.managed_properties_json);
@@ -1503,29 +1504,31 @@ export class PageStore {
       }).immediate();
       return;
     }
-    const markdownHash = this.ensureBlob(markdownBytes, "text/markdown", checkedAt);
+    const documentHash = result.document ? rawHash : this.ensureBlob(markdownBytes, "text/markdown", checkedAt);
     const assetHashes = [...new Set(result.assets.map((asset) => this.ensureBlob(asset.bytes, asset.mimeType, checkedAt)))];
     try {
       const completed = this.db.transaction(() => {
         const current = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM web_capture_jobs WHERE web_capture_id = ?").get(task.webCaptureId);
         if (!current || current.revision !== task.revision || current.lease_owner !== task.owner) return false;
-        const filename = `${slugify(result.title) || `web-capture-${task.webCaptureId}`}.md`;
+        const filename = result.document?.filename ?? `${slugify(result.title) || `web-capture-${task.webCaptureId}`}.md`;
+        const mimeType = result.document?.mimeType ?? "text/markdown";
+        const format = result.document?.format ?? "markdown";
         let documentId = capture.documentId;
         if (documentId === null) {
-          const document = this.db.run("INSERT INTO documents(page_id, filename, mime_type, format, status, managed_title, managed_body, managed_tags_json, managed_properties_json, created_at, updated_at) VALUES (?, ?, 'text/markdown', 'markdown', 'queued', ?, ?, ?, ?, ?, ?)", [task.pageId, filename, page.title, page.body, JSON.stringify(page.tags), JSON.stringify(page.properties), checkedAt, checkedAt]);
+          const document = this.db.run("INSERT INTO documents(page_id, filename, mime_type, format, status, managed_title, managed_body, managed_tags_json, managed_properties_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)", [task.pageId, filename, mimeType, format, page.title, page.body, JSON.stringify(page.tags), JSON.stringify(page.properties), checkedAt, checkedAt]);
           documentId = Number(document.lastInsertRowid);
-          const version = this.db.run("INSERT INTO document_versions(document_id, version, blob_sha256, status, created_at) VALUES (?, 1, ?, 'queued', ?)", [documentId, markdownHash, checkedAt]);
+          const version = this.db.run("INSERT INTO document_versions(document_id, version, blob_sha256, status, created_at) VALUES (?, 1, ?, 'queued', ?)", [documentId, documentHash, checkedAt]);
           this.db.run("INSERT INTO document_jobs(document_id, version_id, requested_at, available_at) VALUES (?, ?, ?, ?)", [documentId, Number(version.lastInsertRowid), checkedAt, checkedAt]);
         } else {
           const managed = managedBefore!;
           const nextVersion = this.db.query<{ version: number }, [number]>("SELECT max(version) AS version FROM document_versions WHERE document_id = ?").get(documentId)!.version + 1;
           this.db.run("UPDATE document_versions SET status = 'superseded' WHERE document_id = ? AND status IN ('queued', 'extracting')", [documentId]);
-          const version = this.db.run("INSERT INTO document_versions(document_id, version, blob_sha256, status, created_at) VALUES (?, ?, ?, 'queued', ?)", [documentId, nextVersion, markdownHash, checkedAt]);
+          const version = this.db.run("INSERT INTO document_versions(document_id, version, blob_sha256, status, created_at) VALUES (?, ?, ?, 'queued', ?)", [documentId, nextVersion, documentHash, checkedAt]);
           this.db.run("DELETE FROM document_section_search WHERE document_id = ?", [documentId]);
           this.db.run("DELETE FROM document_section_chunks WHERE section_id IN (SELECT ds.id FROM document_sections ds JOIN document_versions dv ON dv.id = ds.document_version_id WHERE dv.document_id = ?)", [documentId]);
           this.db.run("DELETE FROM document_semantic_index WHERE document_id = ?", [documentId]);
           this.db.run("DELETE FROM document_semantic_queue WHERE document_id = ?", [documentId]);
-          this.db.run("UPDATE documents SET filename = ?, status = 'queued', needs_ocr = 0, ocr_status = 'not_required', needs_review = ?, managed_title = ?, managed_body = ?, managed_tags_json = ?, managed_properties_json = ?, last_error = NULL, updated_at = ? WHERE id = ?", [filename, humanEditedBefore ? 1 : managed.needs_review, humanEditedBefore ? managed.managed_title : page.title, humanEditedBefore ? managed.managed_body : page.body, humanEditedBefore ? managed.managed_tags_json : JSON.stringify(page.tags), humanEditedBefore ? managed.managed_properties_json : JSON.stringify(page.properties), checkedAt, documentId]);
+          this.db.run("UPDATE documents SET filename = ?, mime_type = ?, format = ?, status = 'queued', needs_ocr = 0, ocr_status = 'not_required', needs_review = ?, managed_title = ?, managed_body = ?, managed_tags_json = ?, managed_properties_json = ?, last_error = NULL, updated_at = ? WHERE id = ?", [filename, mimeType, format, humanEditedBefore ? 1 : managed.needs_review, humanEditedBefore ? managed.managed_title : page.title, humanEditedBefore ? managed.managed_body : page.body, humanEditedBefore ? managed.managed_tags_json : JSON.stringify(page.tags), humanEditedBefore ? managed.managed_properties_json : JSON.stringify(page.properties), checkedAt, documentId]);
           this.db.run("INSERT INTO document_jobs(document_id, version_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, ?, 0, 1) ON CONFLICT(document_id) DO UPDATE SET version_id = excluded.version_id, requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = document_jobs.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [documentId, Number(version.lastInsertRowid), checkedAt, checkedAt]);
         }
         const snapshot = this.db.run("INSERT INTO web_capture_snapshots(web_capture_id, blob_sha256, final_url, http_status, content_type, title, etag, last_modified, size, assets_captured, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)", [task.webCaptureId, rawHash, result.finalUrl, result.status, result.contentType, result.title, result.etag, result.lastModified, result.bytes.byteLength, checkedAt]);
@@ -1537,13 +1540,13 @@ export class PageStore {
       }).immediate();
       if (!completed) {
         if (this.removeBlobIfOrphaned(rawHash)) this.unlinkBlob(rawHash);
-        if (markdownHash !== rawHash && this.removeBlobIfOrphaned(markdownHash)) this.unlinkBlob(markdownHash);
-        for (const hash of assetHashes) if (hash !== rawHash && hash !== markdownHash && this.removeBlobIfOrphaned(hash)) this.unlinkBlob(hash);
+        if (documentHash !== rawHash && this.removeBlobIfOrphaned(documentHash)) this.unlinkBlob(documentHash);
+        for (const hash of assetHashes) if (hash !== rawHash && hash !== documentHash && this.removeBlobIfOrphaned(hash)) this.unlinkBlob(hash);
       }
     } catch (error) {
       if (this.removeBlobIfOrphaned(rawHash)) this.unlinkBlob(rawHash);
-      if (markdownHash !== rawHash && this.removeBlobIfOrphaned(markdownHash)) this.unlinkBlob(markdownHash);
-      for (const hash of assetHashes) if (hash !== rawHash && hash !== markdownHash && this.removeBlobIfOrphaned(hash)) this.unlinkBlob(hash);
+      if (documentHash !== rawHash && this.removeBlobIfOrphaned(documentHash)) this.unlinkBlob(documentHash);
+      for (const hash of assetHashes) if (hash !== rawHash && hash !== documentHash && this.removeBlobIfOrphaned(hash)) this.unlinkBlob(hash);
       throw error;
     }
   }
