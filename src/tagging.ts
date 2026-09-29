@@ -109,9 +109,15 @@ function taggingContent(title: string, sections: DocumentSection[], maximum: num
 }
 
 function parseTopics(raw: string, config: ContentTaggingConfig): ContentTopic[] {
+  const cleaned = raw.replace(/<think>[\s\S]*?<\/think>\s*/gi, "").trim();
+  const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)?.[1];
+  const object = cleaned.match(/\{[\s\S]*\}/)?.[0];
   let value: unknown;
-  try { value = JSON.parse(raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); }
-  catch { throw new AppError("invalid_content_tags", "classification response is not valid JSON", 502); }
+  try { value = JSON.parse(fenced ?? cleaned); }
+  catch {
+    try { value = JSON.parse(object ?? ""); }
+    catch { throw new AppError("invalid_content_tags", "classification response is not valid JSON", 502); }
+  }
   const topics = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>).topics : null;
   if (!Array.isArray(topics)) throw new AppError("invalid_content_tags", "classification response has no topics array", 502);
   const normalized = new Map<string, ContentTopic>();
