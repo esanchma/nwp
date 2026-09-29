@@ -63,7 +63,7 @@ describe("HTTP API", () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);
     expect(apiDocument.headers.get("content-type")).toContain("application/vnd.oai.openapi+json");
-    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.21.8" } });
+    expect((await apiDocument.json() as { openapi: string; info: { version: string } })).toMatchObject({ openapi: "3.1.0", info: { version: "0.21.9" } });
     const publicDocument = await handler(request("/openapi.json"));
     expect(publicDocument.status).toBe(200);
   });
@@ -151,6 +151,10 @@ describe("HTTP API", () => {
     expect(await new DocumentWorker(store, config.documentRag).runUntilIdle()).toBe(1);
     const content = await (await handler(request(`/documents/${readyCapture.documentId}/content`))).text();
     expect(content).toContain(`/web-assets/${imageHash}/chart.png`);
+    expect(content).toContain('<nav class="document-toc"');
+    expect(content).toContain('>Captured</a>');
+    expect(content).toContain('<h2>Captured</h2>');
+    expect(content).not.toContain('Heading: Captured');
     const portableExport = await handler(request(`/web-captures/${capture.id}/export`));
     expect(portableExport.status).toBe(200);
     expect((await portableExport.arrayBuffer()).byteLength).toBeGreaterThan(0);
