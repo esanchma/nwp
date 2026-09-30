@@ -663,7 +663,7 @@ const migrations = [
     ALTER TABLE web_capture_snapshots ADD COLUMN assets_captured INTEGER NOT NULL DEFAULT 0 CHECK (assets_captured IN (0, 1));
   `,
   `
-    CREATE TABLE page_generated_tags (
+    CREATE TABLE IF NOT EXISTS page_generated_tags (
       page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
       tag TEXT NOT NULL COLLATE NOCASE REFERENCES tag_definitions(tag) ON DELETE CASCADE,
       document_version_id INTEGER REFERENCES document_versions(id) ON DELETE SET NULL,
@@ -671,13 +671,13 @@ const migrations = [
       created_at TEXT NOT NULL,
       PRIMARY KEY (page_id, tag)
     );
-    CREATE TABLE page_tag_suppressions (
+    CREATE TABLE IF NOT EXISTS page_tag_suppressions (
       page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
       tag TEXT NOT NULL COLLATE NOCASE REFERENCES tag_definitions(tag) ON DELETE CASCADE,
       created_at TEXT NOT NULL,
       PRIMARY KEY (page_id, tag)
     );
-    CREATE TABLE content_tag_queue (
+    CREATE TABLE IF NOT EXISTS content_tag_queue (
       document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
       version_id INTEGER NOT NULL REFERENCES document_versions(id) ON DELETE CASCADE,
       requested_at TEXT NOT NULL,
@@ -702,6 +702,23 @@ const migrations = [
       FROM documents d
       JOIN document_versions dv ON dv.document_id = d.id
       WHERE d.status = 'ready' AND dv.id = (SELECT latest.id FROM document_versions latest WHERE latest.document_id = d.id ORDER BY latest.version DESC LIMIT 1);
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS web_capture_transcriptions (
+      web_capture_id INTEGER PRIMARY KEY REFERENCES web_captures(id) ON DELETE CASCADE,
+      duration_seconds INTEGER,
+      started_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS web_capture_transcriptions_started_idx ON web_capture_transcriptions(started_at);
+  `,
+  `
+    -- Repair databases created by the short-lived 0.21.12 migration ordering.
+    CREATE TABLE IF NOT EXISTS web_capture_transcriptions (
+      web_capture_id INTEGER PRIMARY KEY REFERENCES web_captures(id) ON DELETE CASCADE,
+      duration_seconds INTEGER,
+      started_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS web_capture_transcriptions_started_idx ON web_capture_transcriptions(started_at);
   `,
 ];
 
@@ -1275,7 +1292,7 @@ export class PageStore {
   }
 
   allWebCaptures(): WebCapture[] {
-    return this.db.query<WebCaptureRow, []>("SELECT * FROM web_captures ORDER BY id").all().map(hydrateWebCapture);
+    return this.db.query<WebCaptureRow, []>("SELECT wc.*, CASE WHEN wt.web_capture_id IS NULL THEN wc.status ELSE 'transcribing' END AS status FROM web_captures wc LEFT JOIN web_capture_transcriptions wt ON wt.web_capture_id = wc.id ORDER BY wc.id").all().map(hydrateWebCapture);
   }
 
   allWebCaptureSnapshots(): WebCaptureSnapshot[] {
@@ -1377,17 +1394,17 @@ export class PageStore {
 
   getWebCapture(id: number): WebCapture {
     if (!Number.isSafeInteger(id) || id < 1) throw new AppError("invalid_web_capture_id", "web capture ID is invalid", 400);
-    const row = this.db.query<WebCaptureRow, [number]>("SELECT wc.* FROM web_captures wc JOIN pages p ON p.id = wc.page_id WHERE wc.id = ? AND p.deleted_at IS NULL").get(id);
+    const row = this.db.query<WebCaptureRow, [number]>("SELECT wc.*, CASE WHEN wt.web_capture_id IS NULL THEN wc.status ELSE 'transcribing' END AS status FROM web_captures wc LEFT JOIN web_capture_transcriptions wt ON wt.web_capture_id = wc.id JOIN pages p ON p.id = wc.page_id WHERE wc.id = ? AND p.deleted_at IS NULL").get(id);
     if (!row) throw new AppError("web_capture_not_found", "web capture not found", 404);
     return hydrateWebCapture(row);
   }
 
   listWebCaptures(): WebCapture[] {
-    return this.db.query<WebCaptureRow, []>("SELECT wc.* FROM web_captures wc JOIN pages p ON p.id = wc.page_id WHERE p.deleted_at IS NULL ORDER BY wc.updated_at DESC, wc.id DESC").all().map(hydrateWebCapture);
+    return this.db.query<WebCaptureRow, []>("SELECT wc.*, CASE WHEN wt.web_capture_id IS NULL THEN wc.status ELSE 'transcribing' END AS status FROM web_captures wc LEFT JOIN web_capture_transcriptions wt ON wt.web_capture_id = wc.id JOIN pages p ON p.id = wc.page_id WHERE p.deleted_at IS NULL ORDER BY wc.updated_at DESC, wc.id DESC").all().map(hydrateWebCapture);
   }
 
   webCaptureForPage(pageId: number): WebCapture | null {
-    const row = this.db.query<WebCaptureRow, [number]>("SELECT wc.* FROM web_captures wc JOIN pages p ON p.id = wc.page_id WHERE wc.page_id = ? AND p.deleted_at IS NULL").get(pageId);
+    const row = this.db.query<WebCaptureRow, [number]>("SELECT wc.*, CASE WHEN wt.web_capture_id IS NULL THEN wc.status ELSE 'transcribing' END AS status FROM web_captures wc LEFT JOIN web_capture_transcriptions wt ON wt.web_capture_id = wc.id JOIN pages p ON p.id = wc.page_id WHERE wc.page_id = ? AND p.deleted_at IS NULL").get(pageId);
     return row ? hydrateWebCapture(row) : null;
   }
 
@@ -1416,13 +1433,24 @@ export class PageStore {
   }
 
   webCaptureByUrl(url: string): WebCapture | null {
-    const row = this.db.query<WebCaptureRow, [string]>("SELECT wc.* FROM web_captures wc JOIN pages p ON p.id = wc.page_id WHERE wc.url = ? AND p.deleted_at IS NULL").get(url);
+    const row = this.db.query<WebCaptureRow, [string]>("SELECT wc.*, CASE WHEN wt.web_capture_id IS NULL THEN wc.status ELSE 'transcribing' END AS status FROM web_captures wc LEFT JOIN web_capture_transcriptions wt ON wt.web_capture_id = wc.id JOIN pages p ON p.id = wc.page_id WHERE wc.url = ? AND p.deleted_at IS NULL").get(url);
     return row ? hydrateWebCapture(row) : null;
+  }
+
+  markWebCaptureTranscribing(task: WebCaptureTask, durationSeconds: number | null): boolean {
+    const now = new Date().toISOString();
+    return this.db.transaction(() => {
+      const lease = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM web_capture_jobs WHERE web_capture_id = ?").get(task.webCaptureId);
+      if (!lease || lease.revision !== task.revision || lease.lease_owner !== task.owner) return false;
+      this.db.run("INSERT INTO web_capture_transcriptions(web_capture_id, duration_seconds, started_at) VALUES (?, ?, ?) ON CONFLICT(web_capture_id) DO UPDATE SET duration_seconds = excluded.duration_seconds, started_at = excluded.started_at", [task.webCaptureId, durationSeconds, now]);
+      this.db.run("UPDATE web_captures SET updated_at = ? WHERE id = ?", [now, task.webCaptureId]);
+      return true;
+    }).immediate();
   }
 
   refreshWebCapture(id: number): WebCapture {
     const capture = this.getWebCapture(id);
-    if (capture.status === "queued" || capture.status === "fetching") throw new AppError("web_capture_running", "web capture is already queued or running", 409);
+    if (capture.status === "queued" || capture.status === "fetching" || capture.status === "transcribing") throw new AppError("web_capture_running", "web capture is already queued or running", 409);
     const now = new Date().toISOString();
     this.db.transaction(() => {
       this.db.run("INSERT INTO web_capture_jobs(web_capture_id, requested_at, available_at, attempts, revision) VALUES (?, ?, ?, 0, 1) ON CONFLICT(web_capture_id) DO UPDATE SET requested_at = excluded.requested_at, available_at = excluded.available_at, attempts = 0, revision = web_capture_jobs.revision + 1, lease_owner = NULL, lease_until = NULL, last_error = NULL", [id, now, now]);
@@ -1478,6 +1506,7 @@ export class PageStore {
       this.db.transaction(() => {
         const current = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM web_capture_jobs WHERE web_capture_id = ?").get(task.webCaptureId);
         if (!current || current.revision !== task.revision || current.lease_owner !== task.owner) return;
+        this.db.run("DELETE FROM web_capture_transcriptions WHERE web_capture_id = ?", [task.webCaptureId]);
         this.db.run("UPDATE web_captures SET final_url = ?, status = 'ready', http_status = 304, etag = ?, last_modified = ?, last_error = NULL, last_checked_at = ?, next_refresh_at = ?, updated_at = ? WHERE id = ?", [result.finalUrl, result.etag, result.lastModified, checkedAt, nextRefresh, checkedAt, task.webCaptureId]);
         this.db.run("DELETE FROM web_capture_jobs WHERE web_capture_id = ? AND revision = ?", [task.webCaptureId, task.revision]);
       }).immediate();
@@ -1499,6 +1528,7 @@ export class PageStore {
       this.db.transaction(() => {
         const current = this.db.query<{ revision: number; lease_owner: string | null }, [number]>("SELECT revision, lease_owner FROM web_capture_jobs WHERE web_capture_id = ?").get(task.webCaptureId);
         if (!current || current.revision !== task.revision || current.lease_owner !== task.owner) return;
+        this.db.run("DELETE FROM web_capture_transcriptions WHERE web_capture_id = ?", [task.webCaptureId]);
         this.db.run("UPDATE web_captures SET final_url = ?, status = 'ready', title = ?, content_type = ?, http_status = ?, etag = ?, last_modified = ?, last_error = NULL, last_checked_at = ?, next_refresh_at = ?, updated_at = ? WHERE id = ?", [result.finalUrl, result.title, result.contentType, result.status, result.etag, result.lastModified, checkedAt, nextRefresh, checkedAt, task.webCaptureId]);
         this.db.run("DELETE FROM web_capture_jobs WHERE web_capture_id = ? AND revision = ?", [task.webCaptureId, task.revision]);
       }).immediate();
@@ -1534,6 +1564,7 @@ export class PageStore {
         const snapshot = this.db.run("INSERT INTO web_capture_snapshots(web_capture_id, blob_sha256, final_url, http_status, content_type, title, etag, last_modified, size, assets_captured, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)", [task.webCaptureId, rawHash, result.finalUrl, result.status, result.contentType, result.title, result.etag, result.lastModified, result.bytes.byteLength, checkedAt]);
         const snapshotId = Number(snapshot.lastInsertRowid);
         for (const asset of result.assets) this.db.run("INSERT INTO web_capture_assets(snapshot_id, ordinal, blob_sha256, source_url, final_url, filename, mime_type, alt_text, size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [snapshotId, asset.ordinal, asset.sha256, asset.sourceUrl, asset.finalUrl, asset.filename, asset.mimeType, asset.alt, asset.bytes.byteLength]);
+        this.db.run("DELETE FROM web_capture_transcriptions WHERE web_capture_id = ?", [task.webCaptureId]);
         this.db.run("UPDATE web_captures SET document_id = ?, final_url = ?, status = 'ready', title = ?, content_type = ?, http_status = ?, etag = ?, last_modified = ?, last_error = NULL, fetched_at = ?, last_checked_at = ?, next_refresh_at = ?, updated_at = ? WHERE id = ?", [documentId, result.finalUrl, result.title, result.contentType, result.status, result.etag, result.lastModified, checkedAt, checkedAt, nextRefresh, checkedAt, task.webCaptureId]);
         this.db.run("DELETE FROM web_capture_jobs WHERE web_capture_id = ? AND revision = ?", [task.webCaptureId, task.revision]);
         return true;
@@ -1560,6 +1591,7 @@ export class PageStore {
     const interval = this.getWebCapture(task.webCaptureId).refreshIntervalSeconds;
     const nextRefresh = failed && interval !== null ? new Date(now.getTime() + interval * 1000).toISOString() : null;
     this.db.transaction(() => {
+      this.db.run("DELETE FROM web_capture_transcriptions WHERE web_capture_id = ?", [task.webCaptureId]);
       this.db.run("UPDATE web_capture_jobs SET attempts = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, last_error = ? WHERE web_capture_id = ? AND revision = ?", [attempts, new Date(now.getTime() + Math.min(60_000, 1000 * 2 ** attempts)).toISOString(), message.slice(0, 2000), task.webCaptureId, task.revision]);
       this.db.run("UPDATE web_captures SET status = ?, last_error = ?, next_refresh_at = ?, updated_at = ? WHERE id = ?", [failed ? "failed" : "queued", message.slice(0, 2000), nextRefresh, now.toISOString(), task.webCaptureId]);
     }).immediate();
@@ -1567,9 +1599,10 @@ export class PageStore {
 
   cancelWebCapture(id: number): WebCapture {
     const capture = this.getWebCapture(id);
-    if (capture.status !== "queued" && capture.status !== "fetching") throw new AppError("web_capture_not_running", "web capture is not queued or running", 409);
+    if (capture.status !== "queued" && capture.status !== "fetching" && capture.status !== "transcribing") throw new AppError("web_capture_not_running", "web capture is not queued or running", 409);
     this.db.transaction(() => {
       this.db.run("DELETE FROM web_capture_jobs WHERE web_capture_id = ?", [id]);
+      this.db.run("DELETE FROM web_capture_transcriptions WHERE web_capture_id = ?", [id]);
       this.db.run("UPDATE web_captures SET status = 'cancelled', updated_at = ? WHERE id = ?", [new Date().toISOString(), id]);
     }).immediate();
     return this.getWebCapture(id);

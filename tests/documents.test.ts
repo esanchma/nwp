@@ -118,7 +118,7 @@ describe("document storage and jobs", () => {
     store = new PageStore(path);
     const columns = store.db.query<{ name: string }, []>("PRAGMA table_info(documents)").all().map(({ name }) => name);
     expect(columns).toContain("ocr_status");
-    expect(store.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(15);
+    expect(store.db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(17);
   });
 
   test("runs local OCR through Tesseract and stores image citations", async () => {

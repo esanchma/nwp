@@ -57,7 +57,7 @@ describe("secure web capture", () => {
   type=text/markdown
 else\n  body='# Delegated article\\n\\nDelegated body'\n  extraction="\${mode#--mode=}"\n  type=text/markdown\nfi\nprintf 'BEGIN_UNTRUSTED_WEB_CONTENT\\nSOURCE_URL: %s\\nEXTRACTION_MODE: %s\\nTITLE: Delegated article\\nCONTENT_TYPE: %s\\n\\n%b\\nEND_UNTRUSTED_WEB_CONTENT\\n' "$2" "$extraction" "$type" "$body"\n`);
     await chmod(command, 0o700);
-    const base = { enabled: true, timeoutSeconds: 30, maxRedirects: 5, maxResponseBytes: 1_000_000, maxExtractedCharacters: 100_000, maxAssetCount: 0, maxAssetBytes: 1_000_000, maxTotalAssetBytes: 1_000_000, fetchCommand: command, fetchTimeoutSeconds: 10, maxFetchOutputBytes: 1_000_000, userAgent: "nwp-test" } as const;
+    const base = { enabled: true, timeoutSeconds: 30, maxRedirects: 5, maxResponseBytes: 1_000_000, maxExtractedCharacters: 100_000, maxAssetCount: 0, maxAssetBytes: 1_000_000, maxTotalAssetBytes: 1_000_000, fetchCommand: command, fetchTimeoutSeconds: 10, transcriptionTimeoutFallbackSeconds: 900, transcriptionTimeoutMaximumSeconds: 7200, maxFetchOutputBytes: 1_000_000, userAgent: "nwp-test" } as const;
     for (const mode of ["trafilatura", "readable", "defuddle", "raw"] as const) {
       const result = await fetchPublicWebPage("https://example.com/article", { ...base, fetchMode: mode });
       expect(result.kind).toBe("content");
@@ -169,6 +169,16 @@ else\n  body='# Delegated article\\n\\nDelegated body'\n  extraction="\${mode#--
     expect(store.listWebCaptureSnapshots(capture.id)).toHaveLength(2);
     expect(store.listDocumentVersions(documentId)).toHaveLength(2);
     expect(store.latestWebCaptureAssets(capture.id)[0]?.blobSha256).toBe(secondHash);
+  });
+
+  test("exposes a durable transcribing phase and clears it on cancellation", () => {
+    const capture = store.createWebCapture("https://example.com/transcript", "rest");
+    const task = store.claimWebCaptureTask("transcription-owner")!;
+    expect(store.markWebCaptureTranscribing(task, 783)).toBe(true);
+    expect(store.getWebCapture(capture.id).status).toBe("transcribing");
+    expect(() => store.refreshWebCapture(capture.id)).toThrow("already queued or running");
+    expect(store.cancelWebCapture(capture.id).status).toBe("cancelled");
+    expect(store.retryWebCapture(capture.id).status).toBe("queued");
   });
 
   test("supports cancellation, safe stale completion, and retry", () => {

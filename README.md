@@ -87,6 +87,9 @@ max_total_asset_bytes = 52428800
 fetch_command = "/home/user/.pi/agent/skills/web-research/web-research" # defaults to the installed skill or web-research on PATH; empty forces native HTTP
 fetch_mode = "readable" # trafilatura, readable, defuddle, or raw
 fetch_timeout_seconds = 180
+# Whisper itself gets max(fallback, 4×video duration), capped here.
+transcription_timeout_fallback_seconds = 900
+transcription_timeout_maximum_seconds = 7200
 max_fetch_output_bytes = 20971520
 user_agent = "nwp/0.20 (+local knowledge capture)"
 
@@ -399,7 +402,7 @@ Office archives are parsed without executing macros, formulas, or external conne
 
 ## Web capture
 
-Queue a public page from `/web-captures`, `nwp web add`, REST, or MCP. When `web_capture.fetch_command` is empty, the durable worker uses nwp's native HTTP transport and deterministic extractor. When it points to `web-research`, nwp delegates page retrieval and extraction as `fetch URL --mode=MODE`, accepts its bounded untrusted-content envelope, and stores the resulting content as a content-addressed snapshot. Both paths send Markdown through the existing document extraction and semantic indexing pipeline. Each capture receives a linked wiki page with `source:web`, `type:web-capture`, and a `web.url` property. Once both workers finish, captured content participates in document search, cited answers, and complete exports.
+Queue a public page from `/web-captures`, `nwp web add`, REST, or MCP. When `web_capture.fetch_command` is empty, the durable worker uses nwp's native HTTP transport and deterministic extractor. When it points to `web-research`, nwp delegates page retrieval and extraction as `fetch URL --mode=MODE`, accepts its bounded untrusted-content envelope, and stores the resulting content as a content-addressed snapshot. Both paths send Markdown through the existing document extraction and semantic indexing pipeline. YouTube captures prefer downloadable manual or automatic captions. Only videos without usable captions enter the durable `transcribing` phase and run local Whisper; Whisper has a duration-derived `4×` timeout with a configurable fallback and cap. Failed or cancelled captures retain their actionable error and can be retried from the web UI, REST, CLI, or MCP. Each capture receives a linked wiki page with `source:web`, `type:web-capture`, and a `web.url` property. Once both workers finish, captured content participates in document search, cited answers, and complete exports.
 
 The native transport retains nwp's strict public-network policy: it validates DNS and every redirect, pins public addresses, sends no credentials, and applies transport limits. Delegated mode intentionally trusts `web-research` and its transports, redirects, cache policy, and specialized tools. nwp still validates the submitted URL, invokes the configured executable without a shell, bounds time and output, parses only the expected envelope, and treats all returned content as untrusted evidence.
 

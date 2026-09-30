@@ -265,7 +265,7 @@ export interface DocumentRecord {
   currentVersion: DocumentVersion;
 }
 
-export type WebCaptureStatus = "queued" | "fetching" | "ready" | "failed" | "cancelled";
+export type WebCaptureStatus = "queued" | "fetching" | "transcribing" | "ready" | "failed" | "cancelled";
 
 export interface WebCapture {
   id: number;

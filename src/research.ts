@@ -95,7 +95,7 @@ export class ResearchWorker {
       let pending = false;
       const usable = [] as typeof sources;
       for (const source of sources) {
-        if (source.status === "queued" || source.status === "fetching") { pending = true; continue; }
+        if (source.status === "queued" || source.status === "fetching" || source.status === "transcribing") { pending = true; continue; }
         if (source.status !== "ready" || source.documentId === null) continue;
         try {
           const document = this.store.getDocument(source.documentId);

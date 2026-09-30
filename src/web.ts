@@ -142,8 +142,8 @@ async function requestOnce(url: URL, config: WebCaptureConfig, conditions: WebFe
   });
 }
 
-export async function fetchPublicWebPage(value: string, config: WebCaptureConfig, conditions: WebFetchConditions | null = null): Promise<WebFetchResult> {
-  if (config.fetchCommand) return fetchWithWebResearch(value, config);
+export async function fetchPublicWebPage(value: string, config: WebCaptureConfig, conditions: WebFetchConditions | null = null, onTranscribing?: (durationSeconds: number | null) => void): Promise<WebFetchResult> {
+  if (config.fetchCommand) return fetchWithWebResearch(value, config, onTranscribing);
   const requestedUrl = normalizeWebUrl(value);
   let current = new URL(requestedUrl);
   for (let redirects = 0; ; redirects += 1) {
@@ -208,14 +208,32 @@ function hasPdfSignature(bytes: Uint8Array): boolean {
   return false;
 }
 
-async function fetchWithWebResearch(value: string, config: WebCaptureConfig): Promise<FetchedWebPage> {
+async function fetchWithWebResearch(value: string, config: WebCaptureConfig, onTranscribing?: (durationSeconds: number | null) => void): Promise<FetchedWebPage> {
   const requestedUrl = normalizeWebUrl(value);
-  const process = Bun.spawn([config.fetchCommand, "fetch", requestedUrl, `--mode=${config.fetchMode}`, "--images=references"], { stdout: "pipe", stderr: "pipe", env: { ...processEnv(), WEB_RESEARCH_NO_CACHE: "1" } });
-  const timer = setTimeout(() => process.kill(), config.fetchTimeoutSeconds * 1000);
+  let stderrBuffer = "";
+  let transcriptionTimerExtended = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const process = Bun.spawn([config.fetchCommand, "fetch", requestedUrl, `--mode=${config.fetchMode}`, "--images=references"], { stdout: "pipe", stderr: "pipe", env: { ...processEnv(), WEB_RESEARCH_NO_CACHE: "1", WEB_RESEARCH_WHISPER_TIMEOUT_FALLBACK_SECONDS: String(config.transcriptionTimeoutFallbackSeconds), WEB_RESEARCH_WHISPER_TIMEOUT_MAXIMUM_SECONDS: String(config.transcriptionTimeoutMaximumSeconds) } });
+  const resetTimer = (seconds: number) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => process.kill(), seconds * 1000);
+  };
+  const observeStderr = (chunk: string) => {
+    stderrBuffer = `${stderrBuffer}${chunk}`.slice(-1024);
+    const match = /NWP_YOUTUBE_TRANSCRIBING duration_seconds=(\d+)/.exec(stderrBuffer);
+    if (match && !transcriptionTimerExtended) {
+      transcriptionTimerExtended = true;
+      const duration = Number(match[1]);
+      const whisperSeconds = Math.min(config.transcriptionTimeoutMaximumSeconds, Math.max(config.transcriptionTimeoutFallbackSeconds, duration > 0 ? duration * 4 : 0));
+      resetTimer(whisperSeconds + 60);
+      onTranscribing?.(duration > 0 ? duration : null);
+    }
+  };
+  resetTimer(config.fetchTimeoutSeconds);
   try {
     const [stdout, stderr, exitCode] = await Promise.all([
       readProcessOutput(process.stdout, config.maxFetchOutputBytes, process),
-      readProcessOutput(process.stderr, Math.min(config.maxFetchOutputBytes, 64 * 1024), process),
+      readProcessOutput(process.stderr, Math.min(config.maxFetchOutputBytes, 64 * 1024), process, observeStderr),
       process.exited,
     ]);
     if (exitCode !== 0) throw new AppError("web_research_fetch_failed", `web-research fetch failed${stderr.trim() ? `: ${stderr.trim().slice(0, 500)}` : ""}`, 502);
@@ -239,7 +257,7 @@ async function fetchWithWebResearch(value: string, config: WebCaptureConfig): Pr
     if (markdown.length > config.maxExtractedCharacters) throw new AppError("web_content_too_large", `extracted content exceeds the ${config.maxExtractedCharacters} character guard`, 413);
     const captured = await captureWebAssets(markdown, prepared.assets, config);
     return { kind: "content", requestedUrl, finalUrl: requestedUrl, status: 200, contentType: "text/plain; profile=web-research", bytes: adapterOutput, title, markdown: captured.markdown, assets: captured.assets, etag: null, lastModified: null };
-  } finally { clearTimeout(timer); }
+  } finally { if (timer) clearTimeout(timer); }
 }
 
 export function parseWebResearchOutput(output: string): { metadata: Record<string, string>; body: string } {
@@ -274,8 +292,9 @@ function extractMarkdownAssetReferences(markdown: string, sourceUrl: string): { 
   return { markdown: rewritten, assets };
 }
 
-async function readProcessOutput(stream: ReadableStream<Uint8Array>, maximum: number, process: ReturnType<typeof Bun.spawn>): Promise<string> {
+async function readProcessOutput(stream: ReadableStream<Uint8Array>, maximum: number, process: ReturnType<typeof Bun.spawn>, onChunk?: (text: string) => void): Promise<string> {
   const reader = stream.getReader();
+  const decoder = new TextDecoder();
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
@@ -285,6 +304,7 @@ async function readProcessOutput(stream: ReadableStream<Uint8Array>, maximum: nu
       size += value.byteLength;
       if (size > maximum) { process.kill(); throw new AppError("web_research_output_too_large", `web-research output exceeds the ${maximum} byte guard`, 413); }
       chunks.push(value);
+      onChunk?.(decoder.decode(value, { stream: true }));
     }
   } finally { reader.releaseLock(); }
   const output = new Uint8Array(size);
@@ -456,7 +476,7 @@ export class WebCaptureWorker {
     if (!task) return false;
     const heartbeat = setInterval(() => this.store.renewWebCaptureLease(task), 10_000);
     try {
-      const result = await fetchPublicWebPage(task.url, this.config, { finalUrl: task.finalUrl, etag: task.etag, lastModified: task.lastModified });
+      const result = await fetchPublicWebPage(task.url, this.config, { finalUrl: task.finalUrl, etag: task.etag, lastModified: task.lastModified }, (durationSeconds) => this.store.markWebCaptureTranscribing(task, durationSeconds));
       this.store.completeWebCaptureTask(task, result, this.documentMaxBytes);
     } catch (error) {
       this.store.failWebCaptureTask(task, error instanceof Error ? error.message : String(error), !(error instanceof AppError && error.status < 500));

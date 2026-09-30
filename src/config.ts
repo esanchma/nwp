@@ -56,6 +56,8 @@ export interface WebCaptureConfig {
   fetchCommand: string;
   fetchMode: WebResearchMode;
   fetchTimeoutSeconds: number;
+  transcriptionTimeoutFallbackSeconds: number;
+  transcriptionTimeoutMaximumSeconds: number;
   maxFetchOutputBytes: number;
   userAgent: string;
 }
@@ -171,6 +173,8 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
     fetchCommand: stringValue(web.fetch_command, "web_capture.fetch_command", defaultFetchCommand, true),
     fetchMode: webResearchMode(web.fetch_mode),
     fetchTimeoutSeconds: numberValue(web.fetch_timeout_seconds, "web_capture.fetch_timeout_seconds", 180),
+    transcriptionTimeoutFallbackSeconds: numberValue(web.transcription_timeout_fallback_seconds, "web_capture.transcription_timeout_fallback_seconds", 900),
+    transcriptionTimeoutMaximumSeconds: numberValue(web.transcription_timeout_maximum_seconds, "web_capture.transcription_timeout_maximum_seconds", 7200),
     maxFetchOutputBytes: numberValue(web.max_fetch_output_bytes, "web_capture.max_fetch_output_bytes", 20 * 1024 * 1024),
     userAgent: stringValue(web.user_agent, "web_capture.user_agent", "nwp/0.20 (+local knowledge capture)"),
   };
