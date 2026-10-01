@@ -41,7 +41,7 @@ async function main(argv: string[]): Promise<void> {
   if (command === "worker") return workerCommand(argv.slice(1));
   if (command === "index") return indexCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") return printHelp();
-  if (command === "--version" || command === "-v") return console.log("nwp 0.21.12");
+  if (command === "--version" || command === "-v") return console.log("nwp 0.21.13");
   throw new Error(`unknown command '${command}'. Run 'nwp help'.`);
 }
 
@@ -239,7 +239,7 @@ async function webCommand(argv: string[]): Promise<void> {
   if (action === "add") {
     const url = positional(options, 0);
     if (!url) throw new Error("web add requires a public HTTP(S) URL");
-    return printResult(await apiRequest(endpoint, token, "/api/v1/web-captures", "POST", { url }), true);
+    return printResult(await apiRequest(endpoint, token, "/api/v1/web-captures", "POST", { url, tag: positional(options, 1) }), true);
   }
   if (["get", "cancel", "retry", "refresh"].includes(action)) {
     const id = integerArgument(options, 0, `web ${action} requires a capture ID`);
@@ -794,7 +794,7 @@ Usage:
   nwp document get ID
   nwp document review|cancel|retry ID
   nwp document run [--json]
-  nwp web add URL
+  nwp web add URL [TAG]
   nwp web list|get|refresh|cancel|retry [ID]
   nwp web export ID [--output PATH]
   nwp web schedule ID --interval SECONDS|off

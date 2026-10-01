@@ -72,9 +72,9 @@ else\n  body='# Delegated article\\n\\nDelegated body'\n  extraction="\${mode#--
   });
 
   test("persists a raw snapshot and queues extracted Markdown as a document", async () => {
-    const capture = store.createWebCapture("https://example.com/policy", "rest");
+    const capture = store.createWebCapture("https://example.com/policy", "rest", "Topic:Leave");
     expect(capture.status).toBe("queued");
-    expect(store.getById(capture.pageId).tags).toContain("source:web");
+    expect(store.getById(capture.pageId).tags).toEqual(["source:web", "topic:leave", "type:web-capture"]);
     const task = store.claimWebCaptureTask("test-owner")!;
     const html = new TextEncoder().encode("<title>Leave policy</title><p>Employees receive sixteen weeks of paid leave.</p>");
     const image = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1]);

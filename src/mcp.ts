@@ -182,10 +182,10 @@ function createServer(store: PageStore, semanticConfig?: SemanticSearchConfig, d
 
   server.registerTool(
     "queue_web_capture",
-    { description: "Queue a durable capture of a public HTTP(S) page; private and reserved network destinations are blocked", inputSchema: { url: z.string().url() } },
-    async ({ url }) => {
+    { description: "Queue a durable capture of a public HTTP(S) page; private and reserved network destinations are blocked", inputSchema: { url: z.string().url(), tag: z.string().optional() } },
+    async ({ url, tag }) => {
       if (!webConfig?.enabled || !documentConfig?.enabled) throw new Error("web capture and document ingestion must be enabled");
-      return toolResult(store.createWebCapture(normalizeWebUrl(url), "mcp"));
+      return toolResult(store.createWebCapture(normalizeWebUrl(url), "mcp", tag));
     },
   );
 

@@ -1375,11 +1375,11 @@ export class PageStore {
     return result;
   }
 
-  createWebCapture(url: string, source: ChangeSource): WebCapture {
+  createWebCapture(url: string, source: ChangeSource, tag?: string): WebCapture {
     if (this.db.query<{ id: number }, [string]>("SELECT id FROM web_captures WHERE url = ?").get(url)) throw new AppError("web_capture_exists", "this URL is already captured", 409);
-    const parsed = new URL(url);
+    new URL(url);
     const title = webCapturePageTitle(url);
-    const page = this.create({ title, body: `Source: ${url}`, tags: ["source:web", "type:web-capture"], properties: { "web.url": url } }, source);
+    const page = this.create({ title, body: `Source: ${url}`, tags: ["source:web", "type:web-capture", tag ?? ""], properties: { "web.url": url } }, source);
     const now = new Date().toISOString();
     try {
       const result = this.db.run("INSERT INTO web_captures(page_id, url, status, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?)", [page.id, url, now, now]);

@@ -133,10 +133,11 @@ describe("HTTP API", () => {
   test("queues and manages secure web captures", async () => {
     const unsafe = await handler(api("/api/v1/web-captures", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: "http://127.0.0.1/private" }) }));
     expect(unsafe.status).toBe(400);
-    const queued = await handler(api("/api/v1/web-captures", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: "https://example.com/article#part" }) }));
+    const queued = await handler(api("/api/v1/web-captures", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: "https://example.com/article#part", tag: "topic:research" }) }));
     expect(queued.status).toBe(202);
-    const capture = await queued.json() as { id: number; url: string; status: string };
+    const capture = await queued.json() as { id: number; pageId: number; url: string; status: string };
     expect(capture).toMatchObject({ url: "https://example.com/article", status: "queued" });
+    expect(store.getById(capture.pageId).tags).toEqual(["source:web", "topic:research", "type:web-capture"]);
     expect((await handler(api(`/api/v1/web-captures/${capture.id}`))).status).toBe(200);
     expect((await handler(api(`/api/v1/web-captures/${capture.id}/cancel`, { method: "POST" }))).status).toBe(200);
     expect((await handler(api(`/api/v1/web-captures/${capture.id}/retry`, { method: "POST" }))).status).toBe(200);
@@ -381,6 +382,27 @@ describe("web", () => {
     expect(body).toContain("Home");
     expect(body).toContain('class="wikilink missing"');
     expect(body).toContain("start");
+  });
+
+  test("renders a click-to-load YouTube embed only for YouTube captures", async () => {
+    const capture = store.createWebCapture("https://www.youtube.com/watch?v=KHTdPEYAMOM", "web");
+    const task = store.claimWebCaptureTask("youtube-test")!;
+    store.completeWebCaptureTask(task, { kind: "content", requestedUrl: capture.url, finalUrl: capture.url, status: 200, contentType: "text/plain", bytes: new TextEncoder().encode("transcript"), title: "JobRunr video", markdown: "# Transcript", assets: [], etag: null, lastModified: null }, config.documentRag.maxFileBytes);
+    const page = store.getById(capture.pageId);
+    const response = await handler(request(`/wiki/${page.alias}`));
+    const body = await response.text();
+    expect(body).toContain('<details class="youtube-embed"><summary>Video</summary>');
+    expect(body).not.toContain("This video is not loaded until");
+    expect(body).toContain('class="button" href="https://www.youtube-nocookie.com/embed/KHTdPEYAMOM?rel=0" target="youtube-embed-');
+    expect(body).toContain("Load YouTube video");
+    expect(body).toContain('referrerpolicy="strict-origin"');
+    expect(response.headers.get("content-security-policy")).toContain("frame-src https://www.youtube-nocookie.com");
+
+    const article = store.createWebCapture("https://example.com/article", "web");
+    const articleTask = store.claimWebCaptureTask("article-test")!;
+    store.completeWebCaptureTask(articleTask, { kind: "content", requestedUrl: article.url, finalUrl: article.url, status: 200, contentType: "text/plain", bytes: new TextEncoder().encode("article"), title: "Article", markdown: "# Article", assets: [], etag: null, lastModified: null }, config.documentRag.maxFileBytes);
+    const articleBody = await (await handler(request(`/wiki/${store.getById(article.pageId).alias}`))).text();
+    expect(articleBody).not.toContain('class="youtube-embed"');
   });
 
   test("provides a sanitized side-by-side Markdown editor preview", async () => {

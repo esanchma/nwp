@@ -69,7 +69,7 @@ export const openApiDocument = {
     },
     "/web-captures": {
       get: { tags: ["Web captures"], operationId: "listWebCaptures", summary: "List durable web captures", responses: { "200": response("Web capture list", { type: "object", required: ["captures"], properties: { captures: { type: "array", items: ref("WebCapture") } } }), ...errorResponses } },
-      post: { tags: ["Web captures"], operationId: "queueWebCapture", summary: "Queue a public HTTP(S) page for secure capture", requestBody: { required: true, content: json({ type: "object", additionalProperties: false, required: ["url"], properties: { url: { type: "string", format: "uri" } } }) }, responses: { "202": response("Queued web capture", ref("WebCapture")), ...errorResponses } },
+      post: { tags: ["Web captures"], operationId: "queueWebCapture", summary: "Queue a public HTTP(S) page for secure capture", requestBody: { required: true, content: json({ type: "object", additionalProperties: false, required: ["url"], properties: { url: { type: "string", format: "uri" }, tag: { type: "string", maxLength: 60 } } }) }, responses: { "202": response("Queued web capture", ref("WebCapture")), ...errorResponses } },
     },
     "/web-captures/{webCaptureId}": {
       parameters: [{ $ref: "#/components/parameters/WebCaptureId" }],
