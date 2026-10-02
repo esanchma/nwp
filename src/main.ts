@@ -41,7 +41,7 @@ async function main(argv: string[]): Promise<void> {
   if (command === "worker") return workerCommand(argv.slice(1));
   if (command === "index") return indexCommand(argv.slice(1));
   if (command === "help" || command === "--help" || command === "-h") return printHelp();
-  if (command === "--version" || command === "-v") return console.log("nwp 0.21.13");
+  if (command === "--version" || command === "-v") return console.log("nwp 0.21.14");
   throw new Error(`unknown command '${command}'. Run 'nwp help'.`);
 }
 
@@ -317,7 +317,7 @@ async function tagCommand(argv: string[]): Promise<void> {
     tag: requiredString(options, "tag"), kind: requiredString(options, "kind"), displayName: optionalString(options, "name") ?? requiredString(options, "tag"), aliases: csvOption(options, "aliases"), description: optionalString(options, "description"),
   });
   else throw new Error("tag command must be list, define, classify, run, or status");
-  printResult(result, true);
+  return printResult(result, true);
 }
 
 async function workerCommand(argv: string[]): Promise<void> {
@@ -432,7 +432,7 @@ async function pageCommand(argv: string[]): Promise<void> {
     throw new Error("page command must be create, get, list, update, delete, history, diff, or restore");
   }
 
-  printResult(result, outputJson);
+  return printResult(result, outputJson);
 }
 
 async function importCommand(argv: string[]): Promise<void> {
@@ -451,7 +451,7 @@ async function importCommand(argv: string[]): Promise<void> {
   });
   const result = await response.json() as { error?: { message?: string } };
   if (!response.ok) throw new Error(result.error?.message ?? `API returned ${response.status}`);
-  printResult(result, hasFlag(options, "json"));
+  return printResult(result, hasFlag(options, "json"));
 }
 
 async function exportCommand(argv: string[]): Promise<void> {
@@ -473,7 +473,7 @@ async function exportCommand(argv: string[]): Promise<void> {
   const response = await fetch(new URL(path, endpoint), { headers: { Authorization: `Bearer ${token}`, "X-NWP-Source": "cli" } });
   if (!response.ok) throw new Error(`API returned ${response.status}`);
   await Bun.write(output, response);
-  printResult({ saved: output }, hasFlag(options, "json"));
+  return printResult({ saved: output }, hasFlag(options, "json"));
 }
 
 async function treeCommand(argv: string[]): Promise<void> {
@@ -483,7 +483,7 @@ async function treeCommand(argv: string[]): Promise<void> {
   const endpoint = optionalString(options, "endpoint") ?? `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${config.port}`;
   const status = optionalString(options, "status") ?? "published";
   const result = await apiRequest(endpoint, token, `/api/v1/tree?status=${encodeURIComponent(status)}`, "GET");
-  printResult(result, hasFlag(options, "json"));
+  return printResult(result, hasFlag(options, "json"));
 }
 
 async function attachmentCommand(argv: string[]): Promise<void> {
@@ -526,7 +526,7 @@ async function attachmentCommand(argv: string[]): Promise<void> {
   } else {
     throw new Error("attachment command must be add, list, get, or delete");
   }
-  printResult(result, hasFlag(options, "json"));
+  return printResult(result, hasFlag(options, "json"));
 }
 
 async function trashCommand(argv: string[]): Promise<void> {
@@ -557,7 +557,7 @@ async function trashCommand(argv: string[]): Promise<void> {
   } else {
     throw new Error("trash command must be list, get, restore, or purge");
   }
-  printResult(result, hasFlag(options, "json"));
+  return printResult(result, hasFlag(options, "json"));
 }
 
 async function searchCommand(argv: string[]): Promise<void> {
@@ -584,7 +584,7 @@ async function searchCommand(argv: string[]): Promise<void> {
     if (value) params.set(parameter, value);
   }
   const result = await apiRequest(endpoint, token, `/api/v1/search?${params}`, "GET");
-  printResult(result, hasFlag(options, "json"));
+  return printResult(result, hasFlag(options, "json"));
 }
 
 async function answerCommand(argv: string[]): Promise<void> {
@@ -610,7 +610,7 @@ async function answerCommand(argv: string[]): Promise<void> {
   if (general !== undefined && general !== "true" && general !== "false") throw new Error("--general-knowledge must be true or false");
   const body: Record<string, unknown> = { question, tags: csvOption(options, "tags"), status: optionalString(options, "status") ?? "published", properties: jsonObjectOption(options, "properties"), filters };
   if (general !== undefined) body.includeGeneralKnowledge = general === "true";
-  printResult(await apiRequest(endpoint, token, "/api/v1/answer", "POST", body), hasFlag(options, "json"));
+  return printResult(await apiRequest(endpoint, token, "/api/v1/answer", "POST", body), hasFlag(options, "json"));
 }
 
 async function downloadApi(endpoint: string, token: string, path: string, destination: string): Promise<void> {
@@ -638,34 +638,52 @@ async function apiRequest(endpoint: string, token: string, path: string, method:
   return value;
 }
 
-function printResult(result: unknown, asJson: boolean): void {
-  if (asJson) return console.log(JSON.stringify(result, null, 2));
-  if (isPage(result)) return console.log(`${result.id}\t${result.alias}\t${result.title}`);
+async function printResult(result: unknown, asJson: boolean): Promise<void> {
+  if (asJson) return writeOutput(JSON.stringify(result, null, 2));
+  if (isPage(result)) return writeOutput(`${result.id}\t${result.alias}\t${result.title}`);
   if (isObject(result) && typeof result.answer === "string" && typeof result.abstained === "boolean") {
-    console.log(result.abstained ? "No hay evidencia suficiente para responder." : result.answer);
-    if (typeof result.generalKnowledge === "string" && result.generalKnowledge) console.log(`\nConocimiento general (sin respaldo documental):\n${result.generalKnowledge}`);
-    if (Array.isArray(result.citations)) for (const citation of result.citations) if (isObject(citation)) console.log(`\n${String(citation.id ?? "")}\t${String(citation.title ?? "")}\t${String(citation.locator ?? "")}\t${String(citation.url ?? "")}`);
-    return;
+    const lines = [result.abstained ? "No hay evidencia suficiente para responder." : result.answer];
+    if (typeof result.generalKnowledge === "string" && result.generalKnowledge) lines.push(`\nConocimiento general (sin respaldo documental):\n${result.generalKnowledge}`);
+    if (Array.isArray(result.citations)) for (const citation of result.citations) if (isObject(citation)) lines.push(`\n${String(citation.id ?? "")}\t${String(citation.title ?? "")}\t${String(citation.locator ?? "")}\t${String(citation.url ?? "")}`);
+    return writeOutput(lines.join("\n"));
   }
   if (isObject(result) && Array.isArray(result.hits)) {
+    const lines: string[] = [];
     for (const hit of result.hits) {
       if (!isObject(hit)) continue;
-      if (hit.source === "page" && isPage(hit.page)) console.log(`page\t${hit.page.id}\t${hit.page.alias}\t${hit.page.title}`);
-      if (hit.source === "document" && isObject(hit.document)) console.log(`document\t${String(hit.document.documentId ?? "")}\t${String(hit.document.sectionId ?? "")}\t${String(hit.document.filename ?? "")}\t${isObject(hit.document.locator) ? String(hit.document.locator.label ?? "") : ""}`);
+      if (hit.source === "page" && isPage(hit.page)) lines.push(`page\t${hit.page.id}\t${hit.page.alias}\t${hit.page.title}`);
+      if (hit.source === "document" && isObject(hit.document)) lines.push(`document\t${String(hit.document.documentId ?? "")}\t${String(hit.document.sectionId ?? "")}\t${String(hit.document.filename ?? "")}\t${isObject(hit.document.locator) ? String(hit.document.locator.label ?? "") : ""}`);
     }
-    if (result.nextCursor) console.error(`next cursor: ${result.nextCursor}`);
+    if (lines.length) await writeOutput(lines.join("\n"));
+    if (result.nextCursor) await writeError(`next cursor: ${result.nextCursor}`);
     return;
   }
   if (isObject(result) && Array.isArray(result.pages)) {
+    const lines: string[] = [];
     for (const page of result.pages) if (isPage(page)) {
       const depthValue = (page as Record<string, unknown>).depth;
       const depth = typeof depthValue === "number" ? depthValue : 0;
-      console.log(`${"  ".repeat(depth)}${page.id}\t${page.alias}\t${page.title}`);
+      lines.push(`${"  ".repeat(depth)}${page.id}\t${page.alias}\t${page.title}`);
     }
-    if (result.nextCursor) console.error(`next cursor: ${result.nextCursor}`);
+    if (lines.length) await writeOutput(lines.join("\n"));
+    if (result.nextCursor) await writeError(`next cursor: ${result.nextCursor}`);
     return;
   }
-  console.log(JSON.stringify(result, null, 2));
+  return writeOutput(JSON.stringify(result, null, 2));
+}
+
+function writeOutput(value: string): Promise<void> {
+  return writeStream(process.stdout, `${value}\n`);
+}
+
+function writeError(value: string): Promise<void> {
+  return writeStream(process.stderr, `${value}\n`);
+}
+
+function writeStream(stream: NodeJS.WriteStream, value: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    stream.write(value, (error) => error ? reject(error) : resolve());
+  });
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
