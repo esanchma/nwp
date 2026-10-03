@@ -20,6 +20,7 @@ Type=simple
 ExecStart=${executable} ${args}
 Restart=on-failure
 RestartSec=3
+Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
