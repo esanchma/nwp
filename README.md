@@ -1,12 +1,12 @@
 # nwp
 
-nwp (nano-wiki-pi) is a small local wiki for people and development agents. It provides a server-rendered web interface, a CLI, and MCP tools over one SQLite database.
+nwp (nano-wiki-pi) is a small local knowledge base and researchable bookmark archive for people and development agents. It provides a server-rendered web interface, a CLI, and MCP tools over one SQLite database.
 
 nwp supports page creation, reading, listing, editing, hybrid full-text and semantic search, durable document extraction with local OCR, versioned web capture with local images, durable multi-source research, citation-grounded answers, revision history, restoration, a recoverable trash, deduplicated file attachments, publication states, custom properties, parent-child navigation, and portable import/export. Pages use GitHub Flavored Markdown, `[[wiki-links]]`, backlinks, and tags. nwp stores a complete snapshot before each meaningful edit.
 
 ## Requirements
 
-Building requires Bun 1.4 or newer on Linux x86-64. The compiled executable does not require Bun at runtime. Web capture uses the `web-research` executable from `~/.pi/agent/skills/web-research/web-research` or `PATH` by default; set `web_capture.fetch_command = ""` to use nwp's native transport instead. Hybrid search and answers require a local Ollama service with the configured models; the defaults can be installed with `ollama pull bge-m3` and `ollama pull qwen3:8b`. Document OCR is optional and uses local `tesseract` plus the `spa` and `eng` language packs. OCR of scanned PDF pages also requires `pdftoppm` from Poppler. Ingestion remains available when these programs are absent.
+Building requires Bun 1.4 or newer on Linux x86-64. The compiled executable does not require Bun at runtime. Web capture uses the `web-research` executable from `~/.pi/agent/skills/web-research/web-research` or `PATH` by default; set `web_capture.fetch_command = ""` to use nwp's native transport instead. Hybrid search and answers require a local Ollama service with the configured models; the defaults can be installed with `ollama pull bge-m3` and `ollama pull qwen3.5:9b`. Document OCR is optional and uses local `tesseract` plus the `spa` and `eng` language packs. OCR of scanned PDF pages also requires `pdftoppm` from Poppler. Ingestion remains available when these programs are absent.
 
 ## Build and test
 
@@ -69,7 +69,7 @@ include_general_knowledge = true
 [content_tagging]
 enabled = true
 ollama_url = "http://127.0.0.1:11434"
-model = "qwen3:8b"
+model = "qwen3.5:9b"
 timeout_seconds = 120
 max_input_characters = 16000
 max_topics = 3
@@ -444,7 +444,7 @@ Use the advanced search page to choose hybrid or lexical mode and filter by sour
 
 ## Citation-grounded answers
 
-Use `/answer`, `nwp answer`, `POST /api/v1/answer`, or the MCP `answer_question` tool to generate a synchronous answer with Ollama. The default generation model is `qwen3:8b`. nwp retrieves evidence first, labels it with application-generated IDs, and accepts only citations that resolve to those IDs. Document citations link to the exact section in the content viewer.
+Use `/answer`, `nwp answer`, `POST /api/v1/answer`, or the MCP `answer_question` tool to generate a synchronous answer with Ollama. The default generation model is `qwen3.5:9b`. nwp retrieves evidence first, labels it with application-generated IDs, and accepts only citations that resolve to those IDs. Document citations link to the exact section in the content viewer.
 
 Document and page content is treated as untrusted quoted evidence. The system prompt explicitly rejects instructions found inside evidence, generation uses a strict JSON schema, and nwp validates every inline citation. Each evidence-backed sentence or bullet must end in a marker such as `[E1]`. An invalid response receives one repair attempt; if it remains invalid, nwp abstains instead of returning an unsupported answer.
 
@@ -486,4 +486,4 @@ The main modules are:
 - `src/mcp.ts`: MCP tools and transport
 - `src/main.ts`: executable and CLI
 
-The approved scope and later roadmap are in [`docs/mvp-spec.md`](docs/mvp-spec.md). The sqlite-vec packaging and Ollama embedding experiments are documented in [`docs/semantic-search-spikes.md`](docs/semantic-search-spikes.md). The reproducible document retrieval smoke benchmark is in [`docs/document-search-benchmark.md`](docs/document-search-benchmark.md). Citation-grounded answer results and reproduction instructions are in [`docs/rag-answer-benchmark.md`](docs/rag-answer-benchmark.md).
+Para navegar la documentación de desarrollo, consulta el [`mapa documental`](docs/documentation-map.md). La arquitectura e invariantes están en [`docs/architecture.md`](docs/architecture.md), y las decisiones de diseño duraderas en [`docs/decisions.md`](docs/decisions.md).
