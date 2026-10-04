@@ -8,6 +8,16 @@ nwp supports page creation, reading, listing, editing, hybrid full-text and sema
 
 Building requires Bun 1.4 or newer on Linux x86-64. The compiled executable does not require Bun at runtime. Web capture uses the `web-research` executable from `~/.pi/agent/skills/web-research/web-research` or `PATH` by default; set `web_capture.fetch_command = ""` to use nwp's native transport instead. Hybrid search and answers require a local Ollama service with the configured models; the defaults can be installed with `ollama pull bge-m3` and `ollama pull qwen3.5:9b`. Document OCR is optional and uses local `tesseract` plus the `spa` and `eng` language packs. OCR of scanned PDF pages also requires `pdftoppm` from Poppler. Ingestion remains available when these programs are absent.
 
+## Install a release
+
+GitHub releases include the Linux x86-64 `nwp` executable as an asset. Download it from the [latest release](https://github.com/esanchma/nwp/releases/latest), then make it executable and place it on your `PATH`:
+
+```sh
+chmod +x nwp
+install -Dm755 nwp ~/.local/bin/nwp
+nwp --version
+```
+
 ## Build and test
 
 ```sh
