@@ -76,7 +76,8 @@ describe("systemd service", () => {
     const config = { dataDir: "/home/test/My Wiki", configPath: "/home/test/.config/nwp/config.toml" } as Config;
     const unit = createSystemdUnit(config, ["/opt/nwp"]);
     expect(unit).toContain('ExecStart="/opt/nwp" "serve" "--with-worker"');
-    expect(unit).toContain('ReadWritePaths="/home/test/My Wiki"');
+    expect(unit).toContain('ReadWritePaths="/home/test/My Wiki" "/home/test/.config/nwp"');
+    expect(unit).toMatch(/nwp\.service"/);
     expect(unit).toContain('Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"');
     expect(unit).toContain("NoNewPrivileges=true");
     expect(unit).toContain("WantedBy=default.target");

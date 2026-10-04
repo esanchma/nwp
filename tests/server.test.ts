@@ -59,6 +59,19 @@ describe("HTTP API", () => {
     expect(response.status).toBe(401);
   });
 
+  test("saves configuration from the settings form and requires network confirmation", async () => {
+    const page = await handler(request("/settings"));
+    expect(page.status).toBe(200);
+    const cookie = page.headers.get("set-cookie")!;
+    const csrf = /nwp_csrf=([^;]+)/.exec(cookie)![1]!;
+    const denied = await handler(request("/settings", { method: "POST", headers: { Cookie: cookie }, body: new URLSearchParams({ csrf, host: "0.0.0.0" }) }));
+    expect(denied.status).toBe(400);
+
+    const saved = await handler(request("/settings", { method: "POST", headers: { Cookie: cookie }, body: new URLSearchParams({ csrf, host: "0.0.0.0", port: "4567", confirm_network: "true" }) }));
+    expect(saved.status).toBe(303);
+    expect(await Bun.file(config.configPath).text()).toContain('host = "0.0.0.0"\nport = 4567');
+  });
+
   test("serves the versioned OpenAPI contract", async () => {
     const apiDocument = await handler(api("/api/v1/openapi.json"));
     expect(apiDocument.status).toBe(200);

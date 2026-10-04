@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -223,12 +223,13 @@ export async function loadConfig(overrides: ConfigOverrides = {}): Promise<Confi
   }
   if (ragAnswer.maxPromptCharacters < ragAnswer.maxEvidenceCharacters) throw new Error("rag_answer.max_prompt_characters must not be smaller than max_evidence_characters");
 
-  for (const [name, value] of Object.entries({ timeout_seconds: webCapture.timeoutSeconds, max_redirects: webCapture.maxRedirects, max_response_bytes: webCapture.maxResponseBytes, max_extracted_characters: webCapture.maxExtractedCharacters, max_asset_count: webCapture.maxAssetCount, max_asset_bytes: webCapture.maxAssetBytes, max_total_asset_bytes: webCapture.maxTotalAssetBytes, fetch_timeout_seconds: webCapture.fetchTimeoutSeconds, max_fetch_output_bytes: webCapture.maxFetchOutputBytes })) {
+  for (const [name, value] of Object.entries({ timeout_seconds: webCapture.timeoutSeconds, max_redirects: webCapture.maxRedirects, max_response_bytes: webCapture.maxResponseBytes, max_extracted_characters: webCapture.maxExtractedCharacters, max_asset_count: webCapture.maxAssetCount, max_asset_bytes: webCapture.maxAssetBytes, max_total_asset_bytes: webCapture.maxTotalAssetBytes, fetch_timeout_seconds: webCapture.fetchTimeoutSeconds, transcription_timeout_fallback_seconds: webCapture.transcriptionTimeoutFallbackSeconds, transcription_timeout_maximum_seconds: webCapture.transcriptionTimeoutMaximumSeconds, max_fetch_output_bytes: webCapture.maxFetchOutputBytes })) {
     if (!Number.isSafeInteger(value) || value < (name === "max_redirects" || name === "max_asset_count" ? 0 : 1)) throw new Error(`web_capture.${name} must be ${name === "max_redirects" || name === "max_asset_count" ? "a non-negative" : "a positive"} integer`);
   }
   if (webCapture.maxRedirects > 20) throw new Error("web_capture.max_redirects must not exceed 20");
   if (webCapture.maxAssetCount > 500) throw new Error("web_capture.max_asset_count must not exceed 500");
   if (webCapture.maxTotalAssetBytes < webCapture.maxAssetBytes) throw new Error("web_capture.max_total_asset_bytes must not be smaller than max_asset_bytes");
+  if (webCapture.transcriptionTimeoutMaximumSeconds < webCapture.transcriptionTimeoutFallbackSeconds) throw new Error("web_capture.transcription_timeout_maximum_seconds must not be smaller than transcription_timeout_fallback_seconds");
   if (webCapture.userAgent.length > 256 || /[\r\n]/.test(webCapture.userAgent)) throw new Error("web_capture.user_agent must be a single line of at most 256 characters");
   if (webCapture.fetchCommand && (webCapture.fetchCommand.length > 4096 || /[\r\n]/.test(webCapture.fetchCommand))) throw new Error("web_capture.fetch_command must be a single executable path");
 
@@ -327,6 +328,101 @@ export async function ensureRuntimeFiles(config: Config): Promise<string> {
   await writeFile(config.tokenPath, `${token}\n`, { mode: 0o600, flag: "wx" });
   await chmod(config.tokenPath, 0o600);
   return token;
+}
+
+export function configToml(config: Config): string {
+  const quote = (value: string): string => JSON.stringify(value);
+  const list = (values: string[]): string => `[${values.map(quote).join(", ")}]`;
+  return `host = ${quote(config.host)}
+port = ${config.port}
+data_dir = ${quote(config.dataDir)}
+max_attachment_bytes = ${config.attachmentMaxBytes ?? 0}
+
+[semantic_search]
+enabled = ${config.semanticSearch.enabled}
+ollama_url = ${quote(config.semanticSearch.ollamaUrl)}
+embedding_model = ${quote(config.semanticSearch.embeddingModel)}
+embedding_dimensions = ${config.semanticSearch.embeddingDimensions}
+query_prefix = ${quote(config.semanticSearch.queryPrefix)}
+chunk_characters = ${config.semanticSearch.chunkCharacters}
+chunk_overlap = ${config.semanticSearch.chunkOverlap}
+
+[rag_answer]
+enabled = ${config.ragAnswer.enabled}
+ollama_url = ${quote(config.ragAnswer.ollamaUrl)}
+generation_model = ${quote(config.ragAnswer.generationModel)}
+timeout_seconds = ${config.ragAnswer.timeoutSeconds}
+max_evidence_items = ${config.ragAnswer.maxEvidenceItems}
+max_evidence_characters = ${config.ragAnswer.maxEvidenceCharacters}
+max_prompt_characters = ${config.ragAnswer.maxPromptCharacters}
+max_answer_characters = ${config.ragAnswer.maxAnswerCharacters}
+max_generation_tokens = ${config.ragAnswer.maxGenerationTokens}
+include_general_knowledge = ${config.ragAnswer.includeGeneralKnowledge}
+
+[content_tagging]
+enabled = ${config.contentTagging.enabled}
+ollama_url = ${quote(config.contentTagging.ollamaUrl)}
+model = ${quote(config.contentTagging.model)}
+timeout_seconds = ${config.contentTagging.timeoutSeconds}
+max_input_characters = ${config.contentTagging.maxInputCharacters}
+max_topics = ${config.contentTagging.maxTopics}
+minimum_confidence = ${config.contentTagging.minimumConfidence}
+
+[web_capture]
+enabled = ${config.webCapture.enabled}
+timeout_seconds = ${config.webCapture.timeoutSeconds}
+max_redirects = ${config.webCapture.maxRedirects}
+max_response_bytes = ${config.webCapture.maxResponseBytes}
+max_extracted_characters = ${config.webCapture.maxExtractedCharacters}
+max_asset_count = ${config.webCapture.maxAssetCount}
+max_asset_bytes = ${config.webCapture.maxAssetBytes}
+max_total_asset_bytes = ${config.webCapture.maxTotalAssetBytes}
+fetch_command = ${quote(config.webCapture.fetchCommand)}
+fetch_mode = ${quote(config.webCapture.fetchMode)}
+fetch_timeout_seconds = ${config.webCapture.fetchTimeoutSeconds}
+transcription_timeout_fallback_seconds = ${config.webCapture.transcriptionTimeoutFallbackSeconds}
+transcription_timeout_maximum_seconds = ${config.webCapture.transcriptionTimeoutMaximumSeconds}
+max_fetch_output_bytes = ${config.webCapture.maxFetchOutputBytes}
+user_agent = ${quote(config.webCapture.userAgent)}
+
+[research]
+enabled = ${config.research.enabled}
+search_command = ${quote(config.research.searchCommand)}
+search_timeout_seconds = ${config.research.searchTimeoutSeconds}
+max_search_output_bytes = ${config.research.maxSearchOutputBytes}
+default_max_sources = ${config.research.defaultMaxSources}
+maximum_sources = ${config.research.maximumSources}
+
+[document_rag]
+enabled = ${config.documentRag.enabled}
+max_file_bytes = ${config.documentRag.maxFileBytes}
+max_expanded_bytes = ${config.documentRag.maxExpandedBytes}
+max_archive_entries = ${config.documentRag.maxArchiveEntries}
+max_compression_ratio = ${config.documentRag.maxCompressionRatio}
+max_pdf_pages = ${config.documentRag.maxPdfPages}
+max_spreadsheet_cells = ${config.documentRag.maxSpreadsheetCells}
+ocr_enabled = ${config.documentRag.ocrEnabled}
+tesseract_command = ${quote(config.documentRag.tesseractCommand)}
+pdf_renderer_command = ${quote(config.documentRag.pdfRendererCommand)}
+ocr_languages = ${list(config.documentRag.ocrLanguages)}
+ocr_timeout_seconds = ${config.documentRag.ocrTimeoutSeconds}
+max_ocr_items = ${config.documentRag.maxOcrItems}
+max_ocr_output_characters = ${config.documentRag.maxOcrOutputCharacters}
+`;
+}
+
+export async function writeConfig(config: Config): Promise<void> {
+  const temporary = `${config.configPath}.tmp-${crypto.randomUUID()}`;
+  const content = configToml(config);
+  await mkdir(dirname(config.configPath), { recursive: true, mode: 0o700 });
+  await writeFile(temporary, content, { mode: 0o600, flag: "wx" });
+  try {
+    await loadConfig({ configPath: temporary });
+    await rename(temporary, config.configPath);
+    await chmod(config.configPath, 0o600);
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
 
 export async function readApiToken(config: Config): Promise<string> {

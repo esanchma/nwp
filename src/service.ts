@@ -1,4 +1,4 @@
-import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { Config } from "./config.ts";
@@ -25,7 +25,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=${systemdQuote(config.dataDir)}
+ReadWritePaths=${[config.dataDir, dirname(config.configPath), systemdUnitPath()].map(systemdQuote).join(" ")}
 
 [Install]
 WantedBy=default.target
@@ -40,6 +40,25 @@ export async function installSystemdService(config: Config): Promise<{ path: str
   await systemctl(["daemon-reload"]);
   await systemctl(["enable", "--now", "nwp.service"]);
   return { path, enabled: true };
+}
+
+export async function refreshSystemdService(config: Config): Promise<boolean> {
+  const path = systemdUnitPath();
+  try {
+    const unit = await readFile(path, "utf8");
+    if (!unit.includes(`--config "${config.configPath.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`)) return false;
+    await writeFile(path, createSystemdUnit(config), { mode: 0o644 });
+    await chmod(path, 0o644);
+    await systemctl(["daemon-reload"]);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+export function restartSystemdServiceSoon(): void {
+  setTimeout(() => { void systemctl(["restart", "nwp.service"]).catch((error) => console.error(error)); }, 250);
 }
 
 export async function uninstallSystemdService(): Promise<{ path: string; removed: boolean }> {

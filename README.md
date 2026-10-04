@@ -120,6 +120,8 @@ max_ocr_output_characters = 1000000
 
 The server also accepts `--host`, `--port`, `--data-dir`, and `--config`. Command-line values override the configuration file.
 
+The web interface provides **Settings** for editing this complete configuration. Saving validates and writes `config.toml`; if nwp was installed as a user service, it updates the unit and schedules a restart. Changing to a non-loopback host requires an explicit confirmation because it exposes nwp on the network. Existing service installations need to be regenerated once with `nwp service install` to grant the settings page limited write access to its configuration file.
+
 The default loopback address is part of nwp's security boundary. Exposing nwp on a network requires a separate security review.
 
 ## Web interface
