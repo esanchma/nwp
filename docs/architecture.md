@@ -1,53 +1,53 @@
-# Arquitectura de nwp
+# nwp architecture
 
-`nwp` es una wiki local para un único usuario y agentes de desarrollo. Ofrece interfaz web SSR, CLI, API REST y MCP sobre una única base SQLite. El comportamiento implementado se define en `src/` y `tests/`; este documento explica cómo encajan sus componentes.
+`nwp` is a local wiki for a single user and development agents. It provides an SSR web interface, CLI, REST API, and MCP over a single SQLite database. The implemented behavior is defined by `src/` and `tests/`; this document explains how its components fit together.
 
-## Límites del sistema
+## System boundaries
 
-- **Local por defecto:** el servidor escucha en `127.0.0.1`; los datos, la configuración y el token siguen rutas XDG. REST y MCP requieren un token Bearer.
-- **SQLite es la autoridad:** guarda metadatos, relaciones, colas y versiones. Las páginas conservan su cuerpo GFM Markdown; los documentos mantienen su original y extracción estructurada.
-- **Interfaces finas:** UI, REST, CLI y MCP comparten validación y persistencia. Una regla de dominio no debe reimplementarse en cada interfaz.
-- **Capacidades opcionales:** Ollama, `sqlite-vec`, Tesseract, Poppler, Whisper y `web-research` mejoran funciones concretas, pero su ausencia no debe impedir crear, leer o buscar léxicamente.
+- **Local by default:** the server listens on `127.0.0.1`; data, configuration, and token follow XDG paths. REST and MCP require a Bearer token.
+- **SQLite is the authority:** it stores metadata, relationships, queues, and versions. Pages retain their GFM Markdown body; documents retain their original and structured extraction.
+- **Thin interfaces:** UI, REST, CLI, and MCP share validation and persistence. A domain rule must not be reimplemented in each interface.
+- **Optional capabilities:** Ollama, `sqlite-vec`, Tesseract, Poppler, Whisper, and `web-research` improve particular functions, but their absence must not prevent creating, reading, or searching lexically.
 
-## Componentes
+## Components
 
-| Área | Módulos principales | Responsabilidad |
+| Area | Main modules | Responsibility |
 | --- | --- | --- |
-| Arranque y configuración | `main.ts`, `config.ts` | CLI, proceso servidor/worker, TOML/XDG y límites por defecto. |
-| Dominio y almacenamiento | `domain.ts`, `database.ts` | Validación, migraciones, transacciones, páginas, revisiones, taxonomía y colas SQLite. |
-| Interfaces HTTP | `server.ts`, `openapi.ts`, `mcp.ts` | UI SSR, API REST, contrato OpenAPI, autenticación y herramientas MCP. |
-| Conocimiento | `semantic.ts`, `answer.ts`, `tagging.ts` | FTS5, vectores, ranking híbrido, RAG con citas y etiquetas asistidas. |
-| Ingesta | `documents.ts`, `web.ts`, `research.ts` | Extracción de documentos, OCR, captura web, investigación y transcripción. |
-| Portabilidad y operación | `transfer.ts`, `backup.ts`, `service.ts` | Importación/exportación, recuperación, copias y unidad systemd de usuario. |
+| Startup and configuration | `main.ts`, `config.ts` | CLI, server and worker process, TOML/XDG, and default limits. |
+| Domain and storage | `domain.ts`, `database.ts` | Validation, migrations, transactions, pages, revisions, taxonomy, and SQLite queues. |
+| HTTP interfaces | `server.ts`, `openapi.ts`, `mcp.ts` | SSR UI, REST API, OpenAPI contract, authentication, and MCP tools. |
+| Knowledge | `semantic.ts`, `answer.ts`, `tagging.ts` | FTS5, vectors, hybrid ranking, cited RAG, and assisted tags. |
+| Ingestion | `documents.ts`, `web.ts`, `research.ts` | Document extraction, OCR, web capture, research, and transcription. |
+| Portability and operation | `transfer.ts`, `backup.ts`, `service.ts` | Import/export, recovery, backups, and the user systemd unit. |
 
-## Flujos de datos
+## Data flows
 
-### Páginas
+### Pages
 
-Una escritura pasa por validación de dominio y una transacción SQLite. La aplicación guarda una revisión antes de un cambio significativo, actualiza enlaces y etiquetas, y encola indexado semántico si está habilitado. La eliminación va a papelera; sólo el purgado destruye datos definitivamente.
+A write passes through domain validation and a SQLite transaction. The application records a revision before a significant change, updates links and tags, and queues semantic indexing when enabled. Deletion moves a page to trash; only purging destroys data permanently.
 
-### Documentos y capturas
+### Documents and captures
 
-Una importación o captura crea una página vinculada y un trabajo durable. El worker extrae secciones y, cuando procede, OCR; después las indexa en FTS y en la cola semántica. Las sustituciones conservan versiones y no sobrescriben silenciosamente cambios humanos. Las capturas almacenan instantáneas y recursos locales direccionados por SHA-256.
+An import or capture creates a linked page and a durable job. The worker extracts sections and, where appropriate, OCR; it then indexes them in FTS and the semantic queue. Replacements retain versions and do not silently overwrite human changes. Captures store snapshots and local SHA-256-addressed resources.
 
-### Búsqueda y respuestas
+### Search and answers
 
-La búsqueda usa FTS5 de inmediato y fusiona resultados vectoriales cuando `sqlite-vec` y Ollama están disponibles. Las respuestas recuperan evidencia primero, generan citas con identificadores controlados por la aplicación y validan cada cita antes de devolverla. Si no hay capacidad semántica, se mantiene la búsqueda léxica con un aviso explícito.
+Search uses FTS5 immediately and merges vector results when `sqlite-vec` and Ollama are available. Answers retrieve evidence first, generate citations with application-controlled identifiers, and validate every citation before returning it. When semantic capability is unavailable, lexical search remains available with an explicit notice.
 
-## Trabajos durables
+## Durable jobs
 
-Extracción, OCR, indexado, captura, investigación y etiquetado son colas SQLite. Cada trabajo usa lease, heartbeat, reintento, cancelación y comprobaciones contra resultados obsoletos. Un handler HTTP debe encolar trabajo; no debe iniciar una tarea larga no persistida en segundo plano.
+Extraction, OCR, indexing, capture, research, and tagging use SQLite queues. Each job uses a lease, heartbeat, retry, cancellation, and checks against stale results. An HTTP handler must enqueue work; it must not start a long-running, unpersisted background task.
 
-## Seguridad y contenido no confiable
+## Security and untrusted content
 
-- La captura nativa sólo permite HTTP(S) público: valida URL, DNS, IP y cada redirección; no envía cookies ni credenciales.
-- El modo delegado confía el transporte y la extracción de texto a `web-research`, pero limita el proceso, valida su envolvente y trata todo resultado como evidencia no confiable. Las imágenes se recuperan con el transporte seguro nativo.
-- Documentos, páginas capturadas y texto de recuperación son datos, nunca instrucciones. RAG y etiquetado usan entradas acotadas y validación determinista de la salida.
-- La UI sanitiza Markdown/HTML; REST y MCP autentican con Bearer; la dirección loopback, Host, origen y CSRF forman parte del límite de seguridad.
+- Native capture permits only public HTTP(S): it validates the URL, DNS, IP, and every redirect, and sends neither cookies nor credentials.
+- Delegated mode entrusts transport and text extraction to `web-research`, but bounds the process, validates its envelope, and treats every result as untrusted evidence. Images use the safe native transport.
+- Documents, captured pages, and retrieved text are data, never instructions. RAG and tagging use bounded inputs and deterministic output validation.
+- The UI sanitizes Markdown and HTML. REST and MCP use Bearer authentication. Loopback addressing, Host, origin, and CSRF are part of the security boundary.
 
-## Cambios que requieren atención adicional
+## Changes requiring additional attention
 
-- Una migración debe ser transaccional, compatible con instalaciones existentes y estar cubierta por pruebas.
-- Cambiar modelo de embeddings, dimensiones, prefijo o fragmentación exige reindexado completo.
-- Cambiar una interfaz pública requiere actualizar implementación, OpenAPI, CLI/MCP según corresponda y `README.md`.
-- Los cambios de captura, OCR o subprocesses deben preservar límites de tiempo, tamaño, rutas y cancelación.
+- A migration must be transactional, compatible with existing installations, and covered by tests.
+- Changing the embedding model, dimensions, prefix, or chunking requires a complete reindex.
+- Changing a public interface requires updating implementation, OpenAPI, CLI or MCP as appropriate, and `README.md`.
+- Changes to capture, OCR, or subprocesses must preserve time, size, path, and cancellation limits.

@@ -1,40 +1,38 @@
-# TODO de nwp
+# nwp TODO
 
-Actualizado tras auditoría de repositorio, documentación y resúmenes de sesiones de Pi. Los elementos se separan por certeza para no convertir hipótesis históricas en requisitos.
+Updated after an audit of the repository, documentation, and Pi session summaries. Items are separated by confidence to avoid turning historical hypotheses into requirements.
 
-## P0 — estado de trabajo actual (confirmado)
+## P0: current work state
 
-- [ ] **Cerrar el ajuste de systemd ya presente en el árbol.** `src/service.ts` añade un `PATH` explícito para el servicio de usuario y `tests/backup.test.ts` lo cubre. Ejecutar `bun test`, `bun run typecheck`, `bun run build` y `git diff --check`; después revisar/confirmar el cambio en un commit propio. Si se despliega, regenerar la unidad mediante `nwp service install` y comprobar `nwp service status`.
-  - Motivo: las sesiones reportaron un fallo de servicio relacionado con el entorno; no descartar estos dos cambios locales.
-  - Criterio de cierre: pruebas verdes, unidad generada con `Environment="PATH=…"`, servicio arrancando con las herramientas configuradas disponibles.
+No confirmed P0 work is currently recorded.
 
-## P1 — verificación operativa recomendada (confirmada como pendiente histórica)
+## P1: recommended operational verification (confirmed historical pending work)
 
-- [ ] **Completar QA manual del ciclo de transcripción sin subtítulos.** Verificar transición `queued → fetching → transcribing → ready`, cancelación durante Whisper y reintento tras un fallo forzado. Confirmar que un vídeo con VTT disponible no entra en `transcribing` ni invoca Whisper.
-  - Contexto: la implementación se publicó en `v0.21.12`; el caso con subtítulos automáticos de la captura 34 se verificó, pero quedó pendiente un caso realmente sin subtítulos.
-  - Criterio de cierre: resultado y comandos reproducibles anotados en un issue/commit o en la documentación operativa; no requiere modificar código si pasa.
+- [ ] **Complete manual QA for the no-subtitles transcription cycle.** Verify the transition `queued → fetching → transcribing → ready`, cancellation during Whisper, and retry after a forced failure. Confirm that a video with available VTT does not enter `transcribing` or invoke Whisper.
+  - Context: the implementation was released in `v0.21.12`; the automatic-subtitle case for capture 34 was verified, but a case genuinely without subtitles remains pending.
+  - Completion criterion: record reproducible results and commands in an issue, commit, or operational documentation. No code change is required if it passes.
 
-- [ ] **Revisar el límite global de captura tras el timeout específico de Whisper.** Evaluar si `web_capture.fetch_timeout_seconds = 900` sigue siendo necesario o puede reducirse sin afectar transcripciones largas.
-  - Criterio de cierre: valor justificado por pruebas representativas y reflejado en configuración/README si cambia.
+- [ ] **Review the global capture limit after the Whisper-specific timeout.** Evaluate whether `web_capture.fetch_timeout_seconds = 900` remains necessary or can be reduced without affecting long transcriptions.
+  - Completion criterion: justify the value with representative tests and reflect it in configuration or README if it changes.
 
-- [ ] **Revisar la calidad de etiquetado automático con contenido real.** Se observaron candidatos demasiado genéricos en sesiones anteriores (por ejemplo, `topic:topic`). Decidir si se endurece el prompt, se filtran términos o se mejora la gobernanza de la taxonomía.
-  - Criterio de cierre: política explícita y prueba de regresión si se modifica el comportamiento.
+- [ ] **Review automatic-tagging quality with real content.** Earlier sessions observed overly generic candidates, for example `topic:topic`. Decide whether to tighten the prompt, filter terms, or improve taxonomy governance.
+  - Completion criterion: define an explicit policy and add a regression test if behavior changes.
 
-## P2 — propuestas de producto, no comprometidas
+## P2: product proposals, not committed
 
-- [ ] **Streaming/progreso de respuestas RAG.** La respuesta actual es síncrona y conserva un fallback sin JavaScript; diseñar UX/API sólo si el tiempo percibido lo justifica.
-- [ ] **Captura de páginas renderizadas o autenticadas.** Requiere una política explícita de navegador, credenciales, cookies, aislamiento y trazabilidad. No sortear el límite SSRF del transporte nativo.
-- [ ] **Navegación enriquecida adicional.** Hay árbol y breadcrumbs; definir casos de uso y criterios de aceptación antes de añadir más superficies de navegación.
-- [ ] **Sincronización OneDrive/SharePoint.** Fue diferida: la entrada documental actual es carga local/UI/REST/CLI. Requiere modelo de identidad, conflictos y permisos antes de implementarse.
+- [ ] **Streaming or progress for RAG answers.** The current answer is synchronous and preserves a no-JavaScript fallback. Design UX and API only if perceived latency justifies it.
+- [ ] **Rendered or authenticated page capture.** This requires an explicit browser, credential, cookie, isolation, and traceability policy. Do not bypass the native transport's SSRF boundary.
+- [ ] **Additional enriched navigation.** Tree and breadcrumbs already exist. Define use cases and acceptance criteria before adding more surfaces.
+- [ ] **OneDrive/SharePoint synchronization.** Deferred: current document intake uses local, UI, REST, and CLI upload. It needs an identity model, conflict handling, and permissions before implementation.
 
-## Deuda de documentación
+## Documentation debt
 
-- [ ] Mantener este backlog y [`docs/decisions.md`](docs/decisions.md) al cerrar una entrega; registrar sólo decisiones duraderas, riesgos y resultados reproducibles, no transcripciones de sesiones.
-- [ ] Al modificar configuración por defecto, contrastar `README.md` con `src/config.ts`. La segunda es la fuente de verdad de runtime.
-- [ ] Mantener actualizado [`docs/documentation-map.md`](docs/documentation-map.md) si se crea o retira una guía de desarrollo.
+- [ ] Keep this backlog and [`docs/decisions.md`](docs/decisions.md) current when closing a delivery. Record only durable decisions, risks, and reproducible outcomes, not session transcripts.
+- [ ] When changing a configuration default, compare `README.md` with `src/config.ts`. The latter is the runtime source of truth.
+- [ ] Keep [`docs/documentation-map.md`](docs/documentation-map.md) up to date when creating or removing a development guide.
 
-## Preguntas abiertas
+## Open questions
 
-- ¿Debe el proyecto gestionar localmente el código/binario de `web-research`? Las sesiones indican que fue una dependencia local sin historial Git, lo que reduce reproducibilidad y auditoría.
-- ¿Qué nivel de soporte operativo se desea para dependencias opcionales (Ollama, modelos, Tesseract, Poppler, Whisper)? Hoy la degradación segura es deliberada; falta decidir instalación, monitorización y alertas.
-- ¿Qué corpus y métricas representan uso real para volver a ejecutar los benchmarks de búsqueda/RAG? Los resultados existentes son smoke benchmarks reproducibles, no una garantía general.
+- Should the project manage the `web-research` code or binary locally? Session records indicate it was a local dependency without Git history, which reduces reproducibility and auditability.
+- What level of operational support is wanted for optional dependencies such as Ollama, models, Tesseract, Poppler, and Whisper? Safe degradation is deliberate today; installation, monitoring, and alerts still need a decision.
+- Which corpus and metrics represent real usage for rerunning search and RAG benchmarks? Existing results are reproducible smoke benchmarks, not a general guarantee.

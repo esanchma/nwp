@@ -1,73 +1,77 @@
-# Guía para agentes: nwp
+# Agent guide: nwp
 
-Entrada operativa compacta para trabajar en este repositorio. Lee primero este archivo y [`TODO.md`](TODO.md); consulta el documento enlazado sólo si el cambio lo requiere.
+Compact operational entry point for working in this repository. Read this file and [`TODO.md`](TODO.md) first; consult a linked document only when the change requires it.
 
-## Primeros 10 minutos
+## First 10 minutes
 
 ```sh
 bun test
 bun run typecheck
 bun run build
-nwp help # o: bun run src/main.ts help
+nwp help # or: bun run src/main.ts help
 ```
 
-- Proyecto: wiki local *single-user*, escrita en TypeScript/Bun y SQLite; ofrece UI SSR, REST, CLI y MCP sobre las mismas reglas de persistencia.
-- Versión/estado de referencia: `package.json`, `src/main.ts` y `src/mcp.ts`. Al redactar esta guía: `0.21.14`, rama `main`, remoto `origin`.
-- Rutas de ejecución por defecto: datos `~/.local/share/nwp`, configuración `~/.config/nwp/config.toml`, token `~/.local/share/nwp/api-token`; se pueden sobrescribir con CLI/configuración XDG.
-- Arranque local: `bun run dev` o `bun run src/main.ts serve --with-worker`. No apuntar pruebas manuales al directorio de datos real salvo que sea deliberado.
-- Antes de editar: `git status --short`. Este árbol contiene cambios locales no confirmados en `src/service.ts` y `tests/backup.test.ts`; consérvalos y no los reviertas mezclados con trabajo ajeno.
+- Project: single-user local wiki written in TypeScript/Bun and SQLite. It provides SSR UI, REST, CLI, and MCP over the same persistence rules.
+- Reference version and state: `package.json`, `src/main.ts`, and `src/mcp.ts`. At the time of writing: `0.22.1`, branch `main`, remote `origin`.
+- Default runtime paths: data `~/.local/share/nwp`, configuration `~/.config/nwp/config.toml`, token `~/.local/share/nwp/api-token`. CLI options and XDG configuration can override them.
+- Local startup: `bun run dev` or `bun run src/main.ts serve --with-worker`. Do not point manual testing at the real data directory unless that is deliberate.
+- Before editing: run `git status --short`. Preserve unrelated local changes; do not revert or mix them with the requested work.
 
-## Forma de trabajar
+## Working approach
 
-- Antes de una funcionalidad de alcance amplio, seguridad, modelo de datos o UX, empieza por QA de requisitos y alternativas; no conviertas una suposición en implementación.
-- Prioriza el flujo de usuario y la claridad de la interfaz antes que ampliar superficie de producto. Mantén el fallback útil sin JavaScript cuando ya exista.
-- Para incidencias operativas, reproduce con comandos y datos acotados antes de cambiar diseño. Documenta únicamente el resultado duradero.
+- Before a broad feature, security change, data-model change, or UX change, start with requirements QA and alternatives. Do not turn an assumption into an implementation.
+- Prioritize user flow and interface clarity before expanding product surface. Preserve a useful no-JavaScript fallback where one already exists.
+- For operational issues, reproduce them with scoped commands and data before changing the design. Document only durable outcomes.
 
-## Arquitectura y puntos de entrada
+## Project language
 
-| Área | Código fuente de verdad |
+English is the official project language. All user-facing material, including public documentation, release notes, UI text, CLI output, API descriptions, and examples, must be written in English. Keep established technical identifiers, commands, and configuration keys unchanged.
+
+## Architecture and entry points
+
+| Area | Source of truth |
 | --- | --- |
-| CLI, proceso servidor y workers | `src/main.ts` |
-| Configuración XDG/TOML, valores por defecto y límites | `src/config.ts` |
-| Esquemas, migraciones SQLite y consultas | `src/database.ts` |
-| Validación y tipos de dominio | `src/domain.ts` |
-| UI SSR, REST, seguridad HTTP y rutas | `src/server.ts` |
-| Herramientas MCP HTTP | `src/mcp.ts` |
-| Búsqueda FTS/vectorial, `sqlite-vec`, Ollama e indexado | `src/semantic.ts` |
-| Ingesta documental y OCR | `src/documents.ts` |
-| Captura web segura y sus workers | `src/web.ts` |
-| Investigación, respuestas RAG y etiquetado | `src/research.ts`, `src/answer.ts`, `src/tagging.ts` |
-| Importación/exportación, copias y systemd | `src/transfer.ts`, `src/backup.ts`, `src/service.ts` |
-| Contrato HTTP | `src/openapi.ts` |
-| Pruebas | `tests/<área>.test.ts` |
+| CLI, server process, and workers | `src/main.ts` |
+| XDG/TOML configuration, defaults, and limits | `src/config.ts` |
+| SQLite schemas, migrations, and queries | `src/database.ts` |
+| Domain validation and types | `src/domain.ts` |
+| SSR UI, REST, HTTP security, and routes | `src/server.ts` |
+| HTTP MCP tools | `src/mcp.ts` |
+| FTS/vector search, `sqlite-vec`, Ollama, and indexing | `src/semantic.ts` |
+| Document ingestion and OCR | `src/documents.ts` |
+| Secure web capture and its workers | `src/web.ts` |
+| Research, RAG answers, and tagging | `src/research.ts`, `src/answer.ts`, `src/tagging.ts` |
+| Import/export, backups, and systemd | `src/transfer.ts`, `src/backup.ts`, `src/service.ts` |
+| HTTP contract | `src/openapi.ts` |
+| Tests | `tests/<area>.test.ts` |
 
-Principio rector: no dupliques reglas de dominio entre UI, REST, CLI y MCP. Añade la lógica/validación a la capa compartida y expón todas las interfaces que el alcance requiera.
+Guiding principle: do not duplicate domain rules across UI, REST, CLI, and MCP. Add shared logic and validation to the common layer, then expose every interface required by the scope.
 
-## Invariantes y límites que no se deben relajar
+## Invariants and limits that must not be relaxed
 
-- SQLite es la autoridad de metadatos; Markdown es el cuerpo humano de las páginas. Las migraciones deben ser transaccionales, compatibles con bases existentes y probadas.
-- Las tareas largas (documentos, OCR, indexado, captura, investigación y etiquetado) son colas durables con leases/reintentos; no ejecutes trabajo en segundo plano desde un handler HTTP sin persistirlo.
-- Los documentos conservan su original y secciones extraídas; no copies el texto completo extraído al Markdown de la página vinculada.
-- Las capturas web son entrada no confiable. Mantén la política SSRF (sólo HTTP(S) público, validación de DNS/redirecciones/IP, sin cookies ni credenciales) y trata la salida delegada de `web-research` como evidencia no confiable.
-- Búsqueda semántica/Ollama/OCR son capacidades opcionales: cuando no estén disponibles, la aplicación debe degradar de forma explícita y segura (por ejemplo, FTS léxica), no romper los flujos básicos.
-- REST y MCP usan `Bearer`; la interfaz web presupone un usuario local de confianza. No abras por defecto el servidor ni debilites las comprobaciones de origen/host.
-- La eliminación de páginas es recuperable hasta el purgado explícito. Adjuntos, documentos, snapshots y assets usan almacenamiento direccionado por SHA-256 y limpieza de huérfanos.
+- SQLite is the metadata authority; Markdown is the human-readable page body. Migrations must be transactional, compatible with existing databases, and tested.
+- Long-running work, including documents, OCR, indexing, capture, research, and tagging, uses durable queues with leases and retries. Do not run background work from an HTTP handler without first persisting it.
+- Documents retain their original and extracted sections. Do not copy the complete extracted text into the Markdown of the linked page.
+- Web captures are untrusted input. Preserve the SSRF policy: public HTTP(S) only, DNS/redirect/IP validation, and no cookies or credentials. Treat delegated `web-research` output as untrusted evidence.
+- Semantic search, Ollama, and OCR are optional capabilities. When unavailable, the application must degrade explicitly and safely, for example to lexical FTS, rather than break basic flows.
+- REST and MCP use Bearer authentication. The web interface assumes a trusted local user. Do not expose the server by default or weaken origin and host checks.
+- Page deletion is recoverable until explicit purging. Attachments, documents, snapshots, and assets use SHA-256-addressed storage and orphan cleanup.
 
-## Flujo de cambio y validación
+## Change and validation flow
 
-1. Localiza un test del área y amplíalo antes o junto al cambio. Para una ruta HTTP, considera servidor, OpenAPI, CLI y MCP según corresponda.
-2. Ejecuta como mínimo `bun test` y `bun run typecheck`. Para cambios de empaquetado, assets o arranque, añade `bun run build` y un smoke del binario si procede.
-3. Ejecuta `git diff --check` antes de entregar. No modifiques datos/configuración reales ni el ejecutable instalado sin autorización explícita.
-4. Mantén los cambios quirúrgicos. No refactorices módulos grandes como efecto colateral de una corrección.
+1. Find a test for the affected area and extend it before or together with the change. For an HTTP route, consider server, OpenAPI, CLI, and MCP as the scope requires.
+2. Run at least `bun test` and `bun run typecheck`. For packaging, asset, or startup changes, add `bun run build` and a binary smoke test where appropriate.
+3. Run `git diff --check` before delivery. Do not modify real data or configuration, or the installed executable, without explicit authorization.
+4. Keep changes surgical. Do not refactor large modules as a side effect of a fix.
 
-La suite no depende por defecto de Ollama, Tesseract ni de una base real.
+The default suite does not depend on Ollama, Tesseract, or a real database.
 
-## Documentación: qué leer y cuándo
+## Documentation: what to read and when
 
-- Uso, instalación y configuración pública: [`README.md`](README.md).
-- Índice y orden de autoridad: [`docs/documentation-map.md`](docs/documentation-map.md).
-- Arquitectura, flujos e invariantes: [`docs/architecture.md`](docs/architecture.md).
-- Decisiones de diseño duraderas: [`docs/decisions.md`](docs/decisions.md).
-- Backlog con prioridades y preguntas: [`TODO.md`](TODO.md).
+- Public use, installation, and configuration: [`README.md`](README.md).
+- Index and authority order: [`docs/documentation-map.md`](docs/documentation-map.md).
+- Architecture, flows, and invariants: [`docs/architecture.md`](docs/architecture.md).
+- Durable design decisions: [`docs/decisions.md`](docs/decisions.md).
+- Prioritized backlog and open questions: [`TODO.md`](TODO.md).
 
-Código y pruebas describen el comportamiento; `src/config.ts` define los valores efectivos de runtime. Actualiza la documentación afectada junto con cualquier cambio público.
+Code and tests describe behavior; `src/config.ts` defines effective runtime values. Update the affected documentation with every public change.

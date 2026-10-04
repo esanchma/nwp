@@ -1,44 +1,44 @@
-# Decisiones de diseño
+# Design decisions
 
-Decisiones vigentes que ayudan a mantener nwp. Para comportamiento exacto, prevalecen código y pruebas.
+Current decisions that help maintain nwp. Code and tests take precedence for exact behavior.
 
-## Producto y experiencia
+## Product and experience
 
-- nwp es una base de conocimiento personal local y una colección de marcadores enriquecidos orientada a recuperación, no sólo un editor de páginas.
-- El flujo de usuario y la legibilidad de la interfaz se priorizan antes que ampliar funcionalidades periféricas. Las mejoras progresivas no deben sustituir el flujo base sin JavaScript cuando éste ya existe.
-- Las páginas de captura integran el contenido extraído y sus recursos locales; no deben obligar al usuario a saltar a una vista técnica para leer el artículo.
-- Los embeds enriquecidos son una excepción sólo para YouTube. Deben ser locales por defecto y cargarse explícitamente por interacción del usuario; no hay un framework genérico de embeds u oEmbed.
+- nwp is a local personal knowledge base and enriched bookmark collection oriented toward retrieval, not merely a page editor.
+- User flow and interface readability take priority over expanding peripheral features. Progressive enhancements must not replace the basic no-JavaScript flow where one exists.
+- Capture pages integrate extracted content and local resources. They must not force the user to switch to a technical view to read an article.
+- Enriched embeds are an exception limited to YouTube. They are local by default and load only after explicit user interaction. There is no generic embed or oEmbed framework.
 
-## Datos y edición
+## Data and editing
 
-- SQLite es la fuente de verdad de metadatos; las páginas usan GFM Markdown y wikilinks.
-- Los alias son editables, ASCII y no distinguen mayúsculas de minúsculas. Las páginas pueden ser `draft`, `published` o `archived`.
-- Cada cambio significativo deja una revisión. La papelera es recuperable y purgar es explícito.
-- Adjuntos, originales de documentos, instantáneas y recursos de captura se deduplican por SHA-256.
-- Las actualizaciones automatizadas preservan los cambios humanos y pueden marcar una página para revisión en vez de sobreescribirla.
+- SQLite is the metadata source of truth; pages use GFM Markdown and wikilinks.
+- Aliases are editable, ASCII, and case-insensitive. Pages can be `draft`, `published`, or `archived`.
+- Every significant change creates a revision. Trash is recoverable and purging is explicit.
+- Attachments, document originals, snapshots, and capture resources are deduplicated by SHA-256.
+- Automated updates preserve human changes and can mark a page for review instead of overwriting it.
 
-## Procesamiento y recuperación
+## Processing and retrieval
 
-- Las operaciones largas se representan como trabajos SQLite durables con lease, heartbeat, reintento y cancelación.
-- La búsqueda híbrida combina FTS5 y `sqlite-vec` mediante fusión de rangos. Si la parte semántica no está disponible, se ofrece búsqueda léxica de forma segura.
-- `bge-m3` es el embedding predeterminado. Cambiar cualquier parámetro que defina una generación vectorial exige reindexar.
-- Las respuestas RAG sólo aceptan citas que resuelven a evidencia recuperada por la aplicación. El conocimiento general, si se habilita, se devuelve separado de la respuesta respaldada por evidencia.
-- Las etiquetas generadas tienen procedencia separada de las humanas y operativas. Quitar una etiqueta generada crea una supresión que la reclasificación no puede restaurar en silencio.
+- Long-running operations are represented as durable SQLite jobs with a lease, heartbeat, retry, and cancellation.
+- Hybrid search combines FTS5 and `sqlite-vec` through rank fusion. If the semantic part is unavailable, the application safely offers lexical search.
+- `bge-m3` is the default embedding model. Changing any parameter that defines a vector generation requires reindexing.
+- RAG answers accept only citations that resolve to application-retrieved evidence. General knowledge, if enabled, is returned separately from the evidence-backed answer.
+- Generated tags have provenance separate from human and operational tags. Removing a generated tag creates a suppression that reclassification cannot silently restore.
 
-## Entrada externa y seguridad
+## External input and security
 
-- Documentos y contenido web son no confiables, incluso cuando se usen para recuperación o generación.
-- El transporte nativo de captura aplica una política SSRF estricta sobre destino, DNS, IP y redirecciones; nunca transmite credenciales.
-- La captura delegada en `web-research` es una frontera de confianza explícita y una dependencia deliberada: no se debe reimplementar su extracción o sus rutas especializadas dentro de nwp sin una razón de producto clara. nwp mantiene límites de proceso, almacenamiento, tratamiento de evidencia e imágenes locales seguras.
-- YouTube usa subtítulos manuales o automáticos antes de Whisper. Sólo los vídeos sin subtítulos utilizables pasan a transcripción; el límite de Whisper se deriva de la duración y tiene fallback y tope configurables.
-- OCR, extracción semántica y generación local son mejoras opcionales: un fallo de dependencia no debe destruir ni bloquear la ingesta básica.
+- Documents and web content are untrusted, even when used for retrieval or generation.
+- Native capture transport applies a strict SSRF policy to the target, DNS, IP, and redirects. It never sends credentials.
+- Delegated capture through `web-research` is an explicit trust boundary and deliberate dependency. Do not reimplement its extraction or specialized routes within nwp without a clear product reason. nwp retains limits on processes, storage, evidence handling, and safe local images.
+- YouTube uses manual or automatic subtitles before Whisper. Only videos without usable subtitles undergo transcription. Whisper's limit derives from duration and has configurable fallback and cap values.
+- OCR, semantic extraction, and local generation are optional enhancements. A dependency failure must not destroy or block basic ingestion.
 
-## Operación
+## Operation
 
-- El estado efectivo de configuración está en `src/config.ts`; `README.md` es su guía pública y debe mantenerse sincronizado.
-- Las copias completas son verificables y la restauración valida una instancia temporal antes de intercambiar directorios. Una restauración real toma el bloqueo de instancia y conserva el token.
-- El servicio systemd de usuario ejecuta servidor y workers. Debe tener un `PATH` explícito cuando dependa de programas instalados fuera de las rutas que systemd hereda.
+- Effective configuration state lives in `src/config.ts`. `README.md` is its public guide and must remain synchronized.
+- Complete backups are verifiable, and restoration validates a temporary instance before swapping directories. A real restore takes the instance lock and preserves the token.
+- The user systemd service runs the server and workers. It must have an explicit `PATH` when it depends on programs installed outside the paths inherited by systemd.
 
-## Cuándo revisar estas decisiones
+## When to revisit these decisions
 
-Reconsidera una decisión cuando cambie su amenaza, una dependencia externa, la escala de datos o los requisitos de usuario. Añade aquí sólo decisiones costosas de revertir, junto con pruebas y documentación pública cuando proceda; no conviertas este archivo en un diario de sesiones.
+Reconsider a decision when its threat model, an external dependency, the data scale, or user requirements change. Add only durable, costly-to-reverse decisions here, together with tests and public documentation where appropriate. Do not turn this file into a session diary.

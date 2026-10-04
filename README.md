@@ -177,7 +177,7 @@ Page commands connect to the running local server and read the generated token a
 ./dist/nwp attachment delete 4
 ./dist/nwp search "installation runtime" --tags "nwp,guide" --status published
 ./dist/nwp search "approval policy" --source documents --format pdf --ocr-status completed --kind page
-./dist/nwp answer "¿Cuánto dura el permiso parental?" --source all --general-knowledge true
+./dist/nwp answer "How long is parental leave?" --source all --general-knowledge true
 ./dist/nwp tree --status all
 ./dist/nwp tag define --tag topic:artificial-intelligence --kind topic --name "Artificial intelligence" --aliases "ai,ia,inteligencia-artificial"
 ./dist/nwp tag list
@@ -498,4 +498,4 @@ The main modules are:
 - `src/mcp.ts`: MCP tools and transport
 - `src/main.ts`: executable and CLI
 
-Para navegar la documentación de desarrollo, consulta el [`mapa documental`](docs/documentation-map.md). La arquitectura e invariantes están en [`docs/architecture.md`](docs/architecture.md), y las decisiones de diseño duraderas en [`docs/decisions.md`](docs/decisions.md).
+For development documentation, see the [`documentation map`](docs/documentation-map.md). Architecture and invariants are in [`docs/architecture.md`](docs/architecture.md), and durable design decisions are in [`docs/decisions.md`](docs/decisions.md).

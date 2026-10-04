@@ -1,29 +1,29 @@
-# Documentación de nwp
+# nwp documentation
 
-La documentación se organiza por propósito. No hay especificaciones MVP, diarios de sesiones ni benchmarks históricos que compitan con el comportamiento actual.
+Documentation is organized by purpose. There are no MVP specifications, session diaries, or historical benchmarks that compete with current behavior.
 
-## Orden de autoridad
+## Authority order
 
-1. Código, migraciones y pruebas (`src/`, `tests/`) definen el comportamiento implementado.
-2. [`README.md`](../README.md) describe instalación, configuración y uso público.
-3. [`AGENTS.md`](../AGENTS.md) y [`TODO.md`](../TODO.md) orientan el trabajo y el backlog.
-4. Las guías de este directorio explican arquitectura y decisiones estables.
+1. Code, migrations, and tests (`src/`, `tests/`) define implemented behavior.
+2. [`README.md`](../README.md) describes public installation, configuration, and use.
+3. [`AGENTS.md`](../AGENTS.md) and [`TODO.md`](../TODO.md) guide work and the backlog.
+4. The guides in this directory explain stable architecture and decisions.
 
-La configuración efectiva siempre está en [`src/config.ts`](../src/config.ts). No deduzcas defaults a partir de una nota, un resultado de rendimiento o una sesión anterior.
+Effective configuration always lives in [`src/config.ts`](../src/config.ts). Do not infer defaults from a note, a performance result, or an earlier session.
 
-## Guías
+## Guides
 
-| Documento | Cuándo leerlo |
+| Document | When to read it |
 | --- | --- |
-| [`../README.md`](../README.md) | Para instalar, ejecutar o utilizar UI, CLI, REST, MCP, importación y copias. |
-| [`../AGENTS.md`](../AGENTS.md) | Al iniciar un cambio en el repositorio: arquitectura rápida, invariantes y validación. |
-| [`../TODO.md`](../TODO.md) | Para conocer trabajo confirmado, propuestas y preguntas abiertas. |
-| [`architecture.md`](architecture.md) | Para cambiar datos, workers, búsqueda, captura, interfaces o límites de seguridad. |
-| [`decisions.md`](decisions.md) | Para entender por qué existen invariantes y elecciones técnicas que siguen vigentes. |
+| [`../README.md`](../README.md) | To install, run, or use the UI, CLI, REST, MCP, import, and backups. |
+| [`../AGENTS.md`](../AGENTS.md) | When starting a repository change: quick architecture, invariants, and validation. |
+| [`../TODO.md`](../TODO.md) | To learn about confirmed work, proposals, and open questions. |
+| [`architecture.md`](architecture.md) | To change data, workers, search, capture, interfaces, or security boundaries. |
+| [`decisions.md`](decisions.md) | To understand the rationale for current invariants and technical choices. |
 
-## Mantenimiento
+## Maintenance
 
-- Actualiza el README si cambia una interfaz, requisito, configuración o flujo de usuario.
-- Actualiza arquitectura si cambia un límite, flujo o responsabilidad entre módulos.
-- Añade a decisiones sólo elecciones duraderas y costosas de revertir; enlaza pruebas o contrato público si aplica.
-- Elimina notas de investigación, resultados puntuales y artefactos de experimentos cuando ya no sirvan para operar o mantener el producto. Las pruebas automatizadas son el mecanismo de regresión.
+- Update the README when an interface, requirement, configuration, or user flow changes.
+- Update architecture when a boundary, flow, or responsibility between modules changes.
+- Add only durable, costly-to-reverse choices to decisions. Link tests or a public contract where applicable.
+- Remove research notes, point-in-time results, and experimental artifacts when they no longer help operate or maintain the product. Automated tests are the regression mechanism.
